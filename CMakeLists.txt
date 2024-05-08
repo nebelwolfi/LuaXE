@@ -17,7 +17,7 @@ find_library(LUAJIT lua51 lib C:\\LuaJIT-2.1.M.64\\src\\)
 set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.rc")
 file(GLOB_RECURSE https https/*.cpp https/*.h)
 
-add_executable(LuaXE main.cpp
+add_executable(luaxe main.cpp
         ${APP_ICON_RESOURCE_WINDOWS}
         pch.cpp
         ${https}
@@ -37,19 +37,19 @@ add_executable(LuaXE main.cpp
         include/shared/bind.h
 )
 
-target_link_libraries(LuaXE LINK_PUBLIC ${LUAJIT} ws2_32.lib)
+target_link_libraries(luaxe LINK_PUBLIC ${LUAJIT} ws2_32.lib)
 
-target_link_options(LuaXE PRIVATE /PDB:LuaXE.pdb)
-target_compile_options(LuaXE PRIVATE "/Zi" PRIVATE "/O2")
-target_link_options(LuaXE PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" PRIVATE "/INCREMENTAL" PRIVATE "/MACHINE:X64" PRIVATE "/LARGEADDRESSAWARE" PRIVATE "/LTCG"  PRIVATE "/DEBUG")
-set_target_properties(LuaXE PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
-set_target_properties(LuaXE PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
-add_custom_command(TARGET LuaXE POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/LuaXE.exe" "D:\\luaxe.dev\\luaxe.exe")
+target_link_options(luaxe PRIVATE /PDB:luaxe.pdb)
+target_compile_options(luaxe PRIVATE "/Zi" PRIVATE "/O2")
+target_link_options(luaxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" PRIVATE "/INCREMENTAL" PRIVATE "/MACHINE:X64" PRIVATE "/LARGEADDRESSAWARE" PRIVATE "/LTCG"  PRIVATE "/DEBUG")
+set_target_properties(luaxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
+set_target_properties(luaxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
+add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "D:\\luaxe.dev\\luaxe.exe")
 
 # Precompiled headers
-target_precompile_headers(LuaXE PRIVATE pch.h)
+target_precompile_headers(luaxe PRIVATE pch.h)
 
 # Versioning
 add_custom_target(depender) # dummy target
 add_custom_command(TARGET depender PRE_BUILD COMMAND powershell -ExecutionPolicy Bypass -NoProfile -NonInteractive -File ${CMAKE_SOURCE_DIR}\\update_version.ps1 ${CMAKE_SOURCE_DIR}\\version.h)
-add_dependencies(LuaXE depender)
+add_dependencies(luaxe depender)
