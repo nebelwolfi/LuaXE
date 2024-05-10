@@ -85,6 +85,13 @@ static int import(lua_State* L) {
                     if (nameinmodule.ends_with(".lua"))
                         nameinmodule = nameinmodule.substr(0, nameinmodule.size() - 4);
                     //printf("Name in module: %s\n", nameinmodule.c_str());
+                    for (auto&& lefs : LefFile::loaded)
+                    for (auto&& cfile : lefs.files) {
+                        if (std::ranges::equal(cfile.name, nameinmodule, ichar_equals)) {
+                            //printf("Skipping file: %s (%.2fMB)\n", fname.c_str(), size / 1024.0 / 1024.0);
+                            goto skip;
+                        }
+                    }
                     if (std::filesystem::exists(path)) {
                         auto fsize = std::filesystem::file_size(path);
                         struct stat buffer;

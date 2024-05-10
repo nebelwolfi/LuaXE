@@ -15,6 +15,7 @@ struct _env {
     const char* exe = nullptr;
     const char* exec_dir = nullptr;
     lua_State*(*new_state)() = nullptr;
+    void(*close_state)(int(*)(lua_State*)) = nullptr;
 };
 
 static _env* inst = nullptr;
@@ -49,6 +50,9 @@ const char* exec_dir() {
 }
 lua_State* new_state() {
     return detail::inst->new_state();
+}
+void on_close(int(*f)(lua_State*)) {
+    detail::inst->close_state(f);
 }
 }
 

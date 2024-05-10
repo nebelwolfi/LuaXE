@@ -7,9 +7,32 @@
 #include "lua/env.h"
 #include "globals.h"
 #include "import.h"
+#include <signal.h>
+
+std::vector<std::function<int(lua_State*)>> on_close;
+
+void sigIntHandler(sig_atomic_t s){
+    lua::env::detail::inst->should_exit = true;
+}
+
+BOOL consoleHandler(DWORD CEvent)
+{
+    if (CEvent == CTRL_CLOSE_EVENT) {
+        lua::env::detail::inst->should_exit = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        return TRUE;
+    }
+    return FALSE;
+}
 
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
 {
+    signal(SIGINT, sigIntHandler);
+    if (GetConsoleWindow()) {
+        SetConsoleOutputCP(65001), SetConsoleCP(65001);
+        SetConsoleCtrlHandler(consoleHandler, TRUE);
+    }
+
     HRESULT hr = CoInitializeEx(nullptr, COINITBASE_MULTITHREADED);
     if (FAILED(hr))
     {
@@ -39,7 +62,14 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         lua::env::detail::inst->exec_dir = static_cast<const char *>(malloc(exec_dir.size() + 1));
         strcpy((char*)lua::env::detail::inst->exec_dir, exec_dir.c_str());
     }
+    lua::env::detail::inst->close_state = +[](int(*f)(lua_State*)) {
+        on_close.emplace_back(f);
+    };
     lua::env::detail::inst->new_state = +[]() -> lua_State* {
+        lua::env::detail::inst->should_restart = false;
+        lua::env::detail::inst->should_relaunch = false;
+        lua::env::detail::inst->should_exit = false;
+
         lua_State* L = luaL_newstate();
         luaL_openlibs(L);
         lua_newtable(L);
@@ -86,10 +116,13 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
     };
 
     do {
+        on_close.clear();
         globals::start_time = std::chrono::high_resolution_clock::now();
         lua_State* L = lua::env::new_state();
         func(L);
         lua_close(L);
+        for (auto&& f : on_close)
+            f(L);
     } while (lua::env::should_restart());
 
     CoUninitialize();

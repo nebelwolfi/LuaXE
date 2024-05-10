@@ -44,6 +44,16 @@ static void open(lua_State*L) {
         ::exit(luaL_optinteger(L, 1, 0));
         return 0;
     });
+    env.fun("relaunch", [](lua_State* L) -> int {
+        detail::inst->should_exit = true;
+        detail::inst->should_relaunch = true;
+        detail::inst->should_restart = false;
+        return 0;
+    });
+    env.fun("reload", [](lua_State* L) -> int {
+        detail::inst->should_restart = true;
+        return 0;
+    });
 
     push(L, detail::inst);
     lua_pushvalue(L, -1);

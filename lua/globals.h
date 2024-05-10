@@ -8,11 +8,12 @@
 namespace globals {
 static int printf(lua_State *L) {
     lua_getglobal(L, "print");
+    lua_insert(L, 1);
     lua_getglobal(L, "string");
     lua_getfield(L, -1, "format");
-    lua_insert(L, 1);
+    lua_insert(L, 2);
     lua_pop(L, 1);
-    lua_call(L, lua_gettop(L) - 1, 1);
+    lua_call(L, lua_gettop(L) - 2, 1);
     lua_call(L, 1, 0);
     return 1;
 }
