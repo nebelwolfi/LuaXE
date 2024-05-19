@@ -29,6 +29,13 @@ static __forceinline bool ichar_equals(char a, char b)
            std::tolower(static_cast<unsigned char>(b));
 }
 
+enum module_type {
+    DLL,
+    LUA,
+    SHARED,
+    UNKNOWN
+};
+
 static int import(lua_State* L) {
     std::string name = lua_tostring(L, 1);
     std::transform(name.begin(), name.end(), name.begin(),
@@ -53,15 +60,16 @@ static int import(lua_State* L) {
         lua_remove(L, 1); // remove version
     auto argc = lua_gettop(L);
     auto modulename = name;
-    auto bIsDll = true, bHasDot = false;
+    auto module_type = module_type::DLL;
+    bool bHasDot = false;
     if (modulename.find('.') != std::string::npos) {
         modulename = modulename.substr(0, modulename.find("."));
-        bIsDll = false;
+        module_type = module_type::LUA;
         bHasDot = true;
     }
     bool bShouldUpdate = true;
     if (version == "local" || lua::env::is_compiled()) {
-        bShouldUpdate = bIsDll && !std::filesystem::exists(std::filesystem::path("modules") / modulename);
+        bShouldUpdate = module_type == module_type::DLL && !std::filesystem::exists(std::filesystem::path("modules") / modulename);
     }
     bool bFailedUpdate = false;
     if (bShouldUpdate)
@@ -72,7 +80,14 @@ static int import(lua_State* L) {
                 auto module = nlohmann::json::parse(modulejson, nullptr, false);
                 /*[{"name":"libcrypto-3-x64.dll","stat":1697787512,"size":5146112,"hash":"34e221f7e4616b0310c2db47c5d30d62"},{"name":"libssl-3-x64.dll","stat":1697787511,"size":777728,"hash":"296959ba144b01b55b998542ec14a34a"},{"name":"mysqlcppconn8-2-vs14.dll","stat":1697787513,"size":4025856,"hash":"3e2fa5a254515965e2f2030653dc31e5"},{"name":"mysqlcppconn-9-vs14.dll","stat":1697787515,"size":9179136,"hash":"3fb819df2896ba8d596a85ffa8873dd0"}]*/
                 std::filesystem::create_directories("modules");
-                bIsDll = module[0]["type"].get<std::string>() == "dll";
+                if (module[0]["type"].get<std::string>() == "dll")
+                    module_type = module_type::DLL;
+                else if (module[0]["type"].get<std::string>() == "lua")
+                    module_type = module_type::LUA;
+                else if (module[0]["type"].get<std::string>() == "shared")
+                    module_type = module_type::SHARED;
+                else
+                    module_type = module_type::UNKNOWN;
                 for (auto idx = 1; idx < module.size(); idx ++) {
                     auto&& file = module[idx];
                     auto fname = file["name"].get<std::string>();
@@ -122,6 +137,7 @@ static int import(lua_State* L) {
                         utime(path.string().c_str(), &new_times);
                     }
                     skip:
+                    ;
                 }
             } else {
                 printf("Failed to update module: %s\n", name.c_str());
@@ -131,14 +147,19 @@ static int import(lua_State* L) {
             printf("Failed to update module: %s (%s)\n", modulename.c_str(), e.what());
             bFailedUpdate = true;
         }
-    if (bIsDll && !bHasDot && (bFailedUpdate || !bShouldUpdate)) { // might not be dll after all
+    if (module_type == module_type::DLL && !bHasDot && (bFailedUpdate || !bShouldUpdate)) { // might not be dll after all
         auto ec = std::error_code();
-        bIsDll = std::filesystem::exists(std::filesystem::path("modules") / modulename / (modulename + ".dll"), ec);
+        module_type = std::filesystem::exists(std::filesystem::path("modules") / modulename / (modulename + ".dll"), ec) ? module_type::DLL : module_type::LUA;
     }
     //printf("Importing module: %s | bIsDll: %d | bHasDot: %d | moduleentry: %s\n", req.c_str(), bIsDll, bHasDot, moduleentry.c_str());
-    if (!bIsDll && !bHasDot) {
+    if (module_type == module_type::LUA && !bHasDot) {
         //printf("!> Imported but not loaded lua module: %s\n", req.c_str());
-        return 0;
+        auto ec = std::error_code();
+        if (std::filesystem::exists(std::filesystem::path("modules") / modulename / (modulename + ".dll"), ec)) {
+            module_type = module_type::DLL;
+        } else {
+            return 0;
+        }
     }
     lua_getglobal(L, "arg");
     lua_newtable(L);
@@ -147,7 +168,7 @@ static int import(lua_State* L) {
         lua_rawseti(L, -2, i);
     }
     lua_setglobal(L, "arg");
-    if (bIsDll)
+    if (module_type == module_type::DLL)
     {
         {
             // package.cpath = package.cpath + ";%dir%/modules/" + name + "/?.dll";
@@ -184,7 +205,7 @@ static int import(lua_State* L) {
     }
     lua_pushvalue(L, -2);
     lua_setglobal(L, "arg");
-    return bIsDll ? lua_pushandstore(L, name.c_str()) : 1;
+    return module_type == module_type::DLL ? lua_pushandstore(L, name.c_str()) : 1;
 }
 
 static int import_open(lua_State* L) {

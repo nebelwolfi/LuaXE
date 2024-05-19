@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <lua.hpp>
 
 class API {
 public:

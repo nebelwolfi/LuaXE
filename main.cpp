@@ -5,7 +5,7 @@
 #include <commands/compile.h>
 #include <commands/run.h>
 #include <lua/state.h>
-#include "include/shared/bind.h"
+#include <luaxe/bind.h>
 
 namespace CommandLineInterface {
     struct Option {

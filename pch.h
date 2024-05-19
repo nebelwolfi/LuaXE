@@ -46,4 +46,4 @@
 #include <span>
 #include <mutex>
 
-#include <lua.hpp>
+#include <luaxe/luaxe.hpp>

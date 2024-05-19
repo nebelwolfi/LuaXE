@@ -10,16 +10,16 @@ struct LefFile {
     struct ArgHeader {
         struct Arg {
             unsigned short length = 0;
-            char data[0];
+            char data[1]{};
         };
         unsigned short numArgs = 0;
-        Arg args[0];
+        Arg args[1]{};
     };
     struct FileHeader {
         struct File {
             unsigned long long len = 0;
             unsigned long nameLen = 0;
-            char data[0];
+            char data[1]{};
         };
         unsigned short numFiles = 0;
         unsigned long long firstFile = 0;

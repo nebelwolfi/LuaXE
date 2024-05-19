@@ -5,8 +5,8 @@
 #ifndef LUAXE_LUA_ENV_H
 #define LUAXE_LUA_ENV_H
 
-#include "include/shared/env.h"
-#include "include/shared/bind.h"
+#include <luaxe/env.h>
+#include <luaxe/bind.h>
 
 namespace lua::env {
 static void open(lua_State*L) {
@@ -52,6 +52,47 @@ static void open(lua_State*L) {
     });
     env.fun("reload", [](lua_State* L) -> int {
         detail::inst->should_restart = true;
+        return 0;
+    });
+    env.prop("cpu_cores", [](lua_State* L) -> int {
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        lua_pushinteger(L, sysinfo.dwNumberOfProcessors);
+        return 1;
+    });
+    env.prop("clipboard", [](lua_State *L) -> int {
+        if (!OpenClipboard(NULL))
+           return 0;
+        HANDLE hData = GetClipboardData(CF_TEXT);
+        if (hData == NULL) {
+           CloseClipboard();
+           return 0;
+        }
+        char* pszText = static_cast<char*>(GlobalLock(hData));
+        if (pszText == NULL) {
+           CloseClipboard();
+           return 0;
+        }
+        lua_pushstring(L, pszText);
+        GlobalUnlock(hData);
+        CloseClipboard();
+        return 1;
+    }, [](lua_State *L) -> int {
+        if (!OpenClipboard(NULL))
+            return 0;
+        EmptyClipboard();
+        size_t len;
+        auto s = luaL_checklstring(L, 3, &len);
+        HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, len + 1);
+        if (!hg) {
+            CloseClipboard();
+            return 0;
+        }
+        memcpy(GlobalLock(hg), s, len + 1);
+        GlobalUnlock(hg);
+        SetClipboardData(CF_TEXT, hg);
+        CloseClipboard();
+        GlobalFree(hg);
         return 0;
     });
 

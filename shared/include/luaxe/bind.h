@@ -5,6 +5,9 @@
 #ifndef LUAXE_BIND_H
 #define LUAXE_BIND_H
 
+#include <memory>
+#include <string>
+
 inline int lua_absindex (lua_State* L, int idx)
 {
     if (idx > LUA_REGISTRYINDEX && idx < 0)
@@ -237,14 +240,10 @@ static int lua_CGCFunction(lua_State* L)
     }
     return 0;
 }
-static void* topointer(lua_State *L, int idx)
-{
-    return *(void**)lua_touserdata(L, idx);
-}
-static int tostring(lua_State* L)
+static int lua_ToString(lua_State* L)
 {
     char asdf[128] = { 0 };
-    snprintf(asdf, sizeof(asdf), "%s{%llX}", lua_tostring(L, lua_upvalueindex(1)), (uintptr_t)topointer(L, 1));
+    snprintf(asdf, sizeof(asdf), "%s{%llX}", lua_tostring(L, lua_upvalueindex(1)), (uintptr_t)*(void**)lua_touserdata(L, 1));
     lua_pushstring(L, asdf);
     return 1;
 }
@@ -258,20 +257,15 @@ static detail::bindable<T> add(lua_State* L, const std::string& name) {
     }
     lua_pushstring(L, name.c_str());
     lua_setfield(L, -2, "__name");
-
     lua_pushstring(L, name.c_str());
-    lua_pushcclosure(L, detail::tostring, 1);
+    lua_pushcclosure(L, detail::lua_ToString, 1);
     lua_setfield(L, -2, "__tostring");
-
     lua_pushcclosure(L, detail::lua_CIndexFunction, 0);
     lua_setfield(L, -2, "__index");
-
     lua_pushcclosure(L, detail::lua_CNewIndexFunction, 0);
     lua_setfield(L, -2, "__newindex");
-
     lua_pushcclosure(L, detail::lua_EQFunction, 0);
     lua_setfield(L, -2, "__eq");
-
     lua_pushcclosure(L, detail::lua_CGCFunction, 0);
     lua_setfield(L, -2, "__gc");
 

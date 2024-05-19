@@ -6,7 +6,7 @@
 #define LUAXE_RUN_H
 
 #include <lua/state.h>
-#include <include/shared/bind.h>
+#include <luaxe/bind.h>
 
 static void parse_and_run(std::ostream& out, int i) {
     if (__argc <= i + 1) {

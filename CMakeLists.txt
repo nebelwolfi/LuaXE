@@ -11,7 +11,7 @@ add_compile_options(
 set_property(GLOBAL PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 include_directories(.) # for pch.h
-include_directories(C:\\LuaJIT-2.1.M.64\\src)
+include_directories(shared/include)
 find_library(LUAJIT lua51 lib C:\\LuaJIT-2.1.M.64\\src\\)
 
 set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.rc")
@@ -24,17 +24,19 @@ add_executable(luaxe main.cpp
         commands/register.h
         commands/update.h
         commands/update.cpp
+        commands/compile.h
+        commands/run.h
         lua/lef.h
         lua/state.h
         lua/state.cpp
         lua/lef.cpp
-        commands/compile.h
-        commands/run.h
-        include/shared/env.h
         lua/import.h
         lua/globals.h
         lua/env.h
-        include/shared/bind.h
+
+        shared/include/luaxe/bind.h
+        shared/include/luaxe/env.h
+        shared/include/luaxe/luaxe.hpp
 )
 
 target_link_libraries(luaxe LINK_PUBLIC ${LUAJIT} ws2_32.lib)

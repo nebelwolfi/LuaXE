@@ -24,34 +24,34 @@ static void init(lua_State* L) {
     if (!detail::inst && L) {
         lua_getfield(L, LUA_REGISTRYINDEX, "_env");
         if (!lua_isnil(L, -1)) {
-            detail::inst = (detail::_env*)lua_touserdata(L, -1);
+            detail::inst = *(detail::_env**)lua_touserdata(L, -1);
         }
         lua_pop(L, 1);
     }
 }
 
-bool should_exit() {
+static bool should_exit() {
     return detail::inst->should_exit;
 }
-bool should_restart() {
+static bool should_restart() {
     return detail::inst->should_restart;
 }
-bool should_relaunch() {
+static bool should_relaunch() {
     return detail::inst->should_relaunch;
 }
-bool is_compiled() {
+static bool is_compiled() {
     return detail::inst->is_compiled;
 }
-const char* exe() {
+static const char* exe() {
     return detail::inst->exe;
 }
-const char* exec_dir() {
+static const char* exec_dir() {
     return detail::inst->exec_dir;
 }
-lua_State* new_state() {
+static lua_State* new_state() {
     return detail::inst->new_state();
 }
-void on_close(int(*f)(lua_State*)) {
+static void on_close(int(*f)(lua_State*)) {
     detail::inst->close_state(f);
 }
 }

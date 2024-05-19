@@ -7,7 +7,7 @@
 #include "lua/env.h"
 #include "globals.h"
 #include "import.h"
-#include <signal.h>
+#include <csignal>
 
 std::vector<std::function<int(lua_State*)>> on_close;
 
@@ -120,9 +120,9 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         globals::start_time = std::chrono::high_resolution_clock::now();
         lua_State* L = lua::env::new_state();
         func(L);
-        lua_close(L);
         for (auto&& f : on_close)
             f(L);
+        lua_close(L);
     } while (lua::env::should_restart());
 
     CoUninitialize();
