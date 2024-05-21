@@ -46,7 +46,7 @@ target_compile_options(luaxe PRIVATE "/Zi" PRIVATE "/O2")
 target_link_options(luaxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" PRIVATE "/INCREMENTAL" PRIVATE "/MACHINE:X64" PRIVATE "/LARGEADDRESSAWARE" PRIVATE "/LTCG"  PRIVATE "/DEBUG")
 set_target_properties(luaxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
 set_target_properties(luaxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
-add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "D:\\luaxe.dev\\luaxe.exe")
+add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "D:\\luaxe.dev\\public\\luaxe.exe")
 
 # Precompiled headers
 target_precompile_headers(luaxe PRIVATE pch.h)

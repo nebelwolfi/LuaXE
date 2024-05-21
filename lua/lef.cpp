@@ -176,33 +176,33 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
     for (const auto& arg : args) {
         totalArgSize += sizeof(ArgHeader::Arg) + arg.size();
     }
-    auto header = Header{
-        .version = 0xd0d0,
-        .fileHeader = {
-            .numFiles = static_cast<unsigned short>(files.size()),
-            .firstFile = sizeof(Header) + totalArgSize
-        },
-        .argHeader = {
-            .numArgs = static_cast<unsigned short>(args.size())
-        }
-    };
-    file.write(reinterpret_cast<const char*>(&header), sizeof(Header));
+    decltype(FileHeader::firstFile) firstFile = sizeof(Header) + totalArgSize;
+    {
+        decltype(Header::version) version = 0xd0d0;
+        file.write(reinterpret_cast<const char *>(&version), sizeof(version));
+    }
+    {
+        auto numFiles = static_cast<unsigned short>(files.size());
+        file.write(reinterpret_cast<const char *>(&numFiles), sizeof(numFiles));
+        file.write(reinterpret_cast<const char *>(&firstFile), sizeof(firstFile));
+    }
+    {
+        auto numArgs = static_cast<unsigned short>(args.size());
+        file.write(reinterpret_cast<const char *>(&numArgs), sizeof(numArgs));
+    }
 
     for (const auto& arg : args) {
-        auto argData = ArgHeader::Arg{
-            .length = static_cast<unsigned short>(arg.size()),
-        };
-        file.write(reinterpret_cast<const char*>(&argData), sizeof(ArgHeader::Arg));
+        decltype(ArgHeader::Arg::length) length = arg.size();
+        file.write(reinterpret_cast<const char*>(&length), sizeof(length));
         file.write(arg.data(), arg.size());
     }
 
-    uint64_t dataOff = header.fileHeader.firstFile + sizeof(FileHeader::File) * files.size() + 1;
+    uint64_t dataOff = firstFile + sizeof(FileHeader::File) * files.size() + 1;
     for (const auto& lf : files) {
-        auto fileData = FileHeader::File{
-            .len = static_cast<unsigned long long>(lf.data.size()),
-            .nameLen = static_cast<unsigned long>(lf.name.size())
-        };
-        file.write(reinterpret_cast<const char*>(&fileData), sizeof(FileHeader::File));
+        decltype(FileHeader::File::len) len = lf.data.size();
+        decltype(FileHeader::File::nameLen) nameLen = lf.name.size();
+        file.write(reinterpret_cast<const char *>(&len), sizeof(len));
+        file.write(reinterpret_cast<const char *>(&nameLen), sizeof(nameLen));
         file.write(lf.name.data(), lf.name.size());
         file.write(lf.data.data(), lf.data.size());
         dataOff += sizeof(FileHeader::File) + lf.data.size() + lf.name.size();
