@@ -173,23 +173,20 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         }
     }
     uint64_t totalArgSize = 0;
-    for (const auto& arg : args) {
+    for (const auto& arg : args)
         totalArgSize += sizeof(ArgHeader::Arg) + arg.size();
-    }
+
+    decltype(Header::version) version = 0xd0d0;
+    file.write(reinterpret_cast<const char *>(&version), sizeof(version));
+
+    auto numFiles = static_cast<unsigned short>(files.size());
+    file.write(reinterpret_cast<const char *>(&numFiles), sizeof(numFiles));
+
     decltype(FileHeader::firstFile) firstFile = sizeof(Header) + totalArgSize;
-    {
-        decltype(Header::version) version = 0xd0d0;
-        file.write(reinterpret_cast<const char *>(&version), sizeof(version));
-    }
-    {
-        auto numFiles = static_cast<unsigned short>(files.size());
-        file.write(reinterpret_cast<const char *>(&numFiles), sizeof(numFiles));
-        file.write(reinterpret_cast<const char *>(&firstFile), sizeof(firstFile));
-    }
-    {
-        auto numArgs = static_cast<unsigned short>(args.size());
-        file.write(reinterpret_cast<const char *>(&numArgs), sizeof(numArgs));
-    }
+    file.write(reinterpret_cast<const char *>(&firstFile), sizeof(firstFile));
+
+    auto numArgs = static_cast<unsigned short>(args.size());
+    file.write(reinterpret_cast<const char *>(&numArgs), sizeof(numArgs));
 
     for (const auto& arg : args) {
         decltype(ArgHeader::Arg::length) length = arg.size();

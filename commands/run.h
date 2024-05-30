@@ -9,16 +9,24 @@
 #include <luaxe/bind.h>
 
 static void parse_and_run(std::ostream& out, int i) {
+    std::string source;
     if (__argc <= i + 1) {
-        out << "No source provided, try \"luaxe help compile\"." << std::endl;
-        return;
+        if (std::filesystem::exists("main.lua")) {
+            source = "main.lua";
+        } else if (std::filesystem::exists("main.lef")) {
+            source = "main.lef";
+        } else {
+            out << "No source provided, try \"luaxe help compile\"." << std::endl;
+            return;
+        }
+    } else {
+        source = __argv[++i];
+        if (!source.ends_with(".lua") && !source.ends_with(".lef")) {
+            out << "Invalid source provided, try \"luaxe help run\"." << std::endl;
+            return;
+        }
+        i++;
     }
-    std::string source = __argv[++i];
-    if (!source.ends_with(".lua") && !source.ends_with(".lef")) {
-        out << "Invalid source provided, try \"luaxe help run\"." << std::endl;
-        return;
-    }
-    i++;
     load_lua_state_and_run([&](lua_State* L) {
         lua_createtable(L, __argc - i, 0);
         for (int j = i; j < __argc; j++) {

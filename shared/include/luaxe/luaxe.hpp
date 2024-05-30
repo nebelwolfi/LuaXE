@@ -7,3 +7,4 @@ extern "C" {
 
 #include "bind.h"
 #include "env.h"
+#include "debug.h"

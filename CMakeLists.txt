@@ -14,7 +14,9 @@ include_directories(.) # for pch.h
 include_directories(shared/include)
 find_library(LUAJIT lua51 lib C:\\LuaJIT-2.1.M.64\\src\\)
 
-set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.rc")
+set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.rc"
+        commands/install.h
+        shared/include/luaxe/debug.h)
 file(GLOB_RECURSE https https/*.cpp https/*.h)
 
 add_executable(luaxe main.cpp
@@ -47,6 +49,7 @@ target_link_options(luaxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF
 set_target_properties(luaxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
 set_target_properties(luaxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
 add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "D:\\luaxe.dev\\public\\luaxe.exe")
+add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "${CMAKE_SOURCE_DIR}/bin/lxe.exe")
 
 # Precompiled headers
 target_precompile_headers(luaxe PRIVATE pch.h)
