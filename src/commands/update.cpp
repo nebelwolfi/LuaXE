@@ -1,10 +1,10 @@
 //
 // Created by Nebelwolfi on 08/05/2024.
 //
-#include <pch.h>
+#include "../pch.h"
 #include "update.h"
-#include "https/connection/API.h"
-#include "https/misc/md5.h"
+#include "../https/connection/API.h"
+#include "../https/misc/md5.h"
 
 void check_for_updates_and_update() {
 

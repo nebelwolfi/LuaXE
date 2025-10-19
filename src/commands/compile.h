@@ -5,7 +5,7 @@
 #ifndef LUAXE_COMPILE_H
 #define LUAXE_COMPILE_H
 
-#include "lua/lef.h"
+#include "src/lua/lef.h"
 
 static void parse_and_compile(std::ostream& out, int i) {
     if (__argc <= i + 1) {

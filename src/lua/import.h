@@ -5,11 +5,11 @@
 #ifndef LUAXE_IMPORT_H
 #define LUAXE_IMPORT_H
 
-#include "https/connection/API.h"
-#include "https/misc/json.hpp"
-#include "https/misc/md5.h"
+#include "../https/connection/API.h"
+#include "../https/misc/json.hpp"
+#include "../https/misc/md5.h"
 #include <sys/utime.h>
-#include <commands/install.h>
+#include "../commands/install.h"
 #include <unordered_set>
 
 extern "C" int ll_loadfunc(lua_State *L, const char *path, const char *name, int r);
@@ -53,7 +53,7 @@ static int import(lua_State* L) {
         // check if its already in package.modules
         lua_getglobal(L, "package");
         lua_getfield(L, -1, "modules");
-        lua_pushvalue(L, 1);
+        lua_pushvalue(L, 1); // push name
         lua_gettable(L, -2);
         if (!lua_isnil(L, -1)) {
             return 1;
@@ -66,9 +66,11 @@ static int import(lua_State* L) {
         lua_remove(L, 1); // remove version
     auto argc = lua_gettop(L);
     auto modulename = name;
+    auto name_after_dot = name;
     bool bHasDot = false;
     if (modulename.find('.') != std::string::npos) {
         modulename = modulename.substr(0, modulename.find("."));
+        name_after_dot = name.substr(name.find('.')+1);
         bHasDot = true;
     }
     bool bShouldUpdate = true;
@@ -79,11 +81,15 @@ static int import(lua_State* L) {
         install_module(modulename + "@" + version);
         installed_modules.insert(modulename);
     }
-    //printf("Importing module: %s | bIsDll: %d | bHasDot: %d | moduleentry: %s\n", req.c_str(), bIsDll, bHasDot, moduleentry.c_str());
-    bool isDllInclude = std::filesystem::exists(std::filesystem::path("modules") / modulename / (modulename + ".dll"));
+    //printf("Importing module: %s | bHasDot: %d | moduleentry: %s\n", modulename.c_str(), bHasDot, (std::filesystem::path("modules") / modulename / (name_after_dot + ".dll")).string().c_str());
+    bool isDllInclude = std::filesystem::exists(std::filesystem::path("modules") / modulename / (name_after_dot + ".dll"));
     if (!isDllInclude && !bHasDot) {
-        // probably tried to just install a non-dll module, no need to load it
-        return 0;
+        bool hasLuaFile = std::filesystem::exists(std::filesystem::path("modules") / modulename / (name_after_dot + ".lua"));
+        if (!hasLuaFile) {
+            // probably tried to just install a non-dll module, no need to load anything
+            return 0;
+        }
+        name = modulename + "." + name_after_dot; // try to load lua file instead
     }
     lua_getglobal(L, "arg");
     lua_newtable(L);
@@ -111,10 +117,11 @@ static int import(lua_State* L) {
                 lua_pushstring(L, "Failed to download lua51.dll");
                 lua_error(L);
                 return 0;
-            }
+            } else
+                AddDllDirectory((std::filesystem::current_path() / "modules").wstring().c_str());
         }
         AddDllDirectory((std::filesystem::current_path() / "modules" / modulename).wstring().c_str());
-        if (ll_loadfunc(L, ((std::filesystem::current_path() / "modules" / modulename / modulename).string() + ".dll").c_str(), name.c_str(), 0)) {
+        if (ll_loadfunc(L, ((std::filesystem::current_path() / "modules" / modulename / name_after_dot).string() + ".dll").c_str(), name.c_str(), 0)) {
             lua_pop(L, 1);
             lua_getglobal(L, "require");
             lua_pushstring(L, name.c_str());
