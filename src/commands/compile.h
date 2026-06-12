@@ -5,7 +5,7 @@
 #ifndef LUAXE_COMPILE_H
 #define LUAXE_COMPILE_H
 
-#include "lua/lef.h"
+#include "src/lua/lef.h"
 
 static void parse_and_compile(std::ostream& out, int i) {
     if (__argc <= i + 1) {
@@ -15,6 +15,7 @@ static void parse_and_compile(std::ostream& out, int i) {
     bool strip = false, pack = false, verbose = false;
     std::string source, output, main;
     std::vector<std::string> args;
+    std::vector<std::string> bundle_modules;
     bool found_args = false;
     source = __argv[++i];
     for (int j = ++i; j < __argc; j++) {
@@ -36,6 +37,28 @@ static void parse_and_compile(std::ostream& out, int i) {
                 main = __argv[j + 1];
                 j++;
                 if (verbose) out << "Main file: " << main << std::endl;
+            } else if (__argv[j][1] == 'b') {
+                std::string mods = __argv[j + 1];
+                j++;
+                // Parse comma-separated module names, or "all" to bundle everything in modules/
+                if (mods == "all") {
+                    for (auto& entry : std::filesystem::directory_iterator("modules")) {
+                        if (entry.is_directory() && entry.path().filename().string() != "." && entry.path().filename().string() != "..") {
+                            bundle_modules.push_back(entry.path().filename().string());
+                        }
+                    }
+                } else {
+                    std::istringstream ss(mods);
+                    std::string mod;
+                    while (std::getline(ss, mod, ',')) {
+                        if (!mod.empty()) bundle_modules.push_back(mod);
+                    }
+                }
+                if (verbose) {
+                    out << "Bundling modules:";
+                    for (const auto& m : bundle_modules) out << " " << m;
+                    out << std::endl;
+                }
             } else if (__argv[j][1] == '-') {
                 found_args = true;
                 if (verbose) out << "Arguments: ";
@@ -64,7 +87,7 @@ static void parse_and_compile(std::ostream& out, int i) {
         if (verbose) out << "Output file: " << output << std::endl;
     }
     if (verbose) out << "Source: " << source << std::endl;
-    LefFile::store_as_lef(output, source, main, args, strip, verbose);
+    LefFile::store_as_lef(output, source, main, args, bundle_modules, strip, verbose);
 }
 
 #endif //LUAXE_COMPILE_H

@@ -1,15 +1,16 @@
 //
 // Created by Nebelwolfi on 08/05/2024.
 //
-#include <pch.h>
+#include "../pch.h"
 #include "state.h"
 #include "lef.h"
-#include "lua/env.h"
+#include "env.h"
 #include "globals.h"
 #include "import.h"
 #include <csignal>
+#include "src/stack_tracer.h"
 
-std::vector<std::function<int(lua_State*)>> on_close;
+std::vector<int(*)(lua_State*)> on_close;
 
 void sigIntHandler(sig_atomic_t s){
     lua::env::detail::inst->should_exit = true;
@@ -24,6 +25,9 @@ BOOL consoleHandler(DWORD CEvent)
     }
     return FALSE;
 }
+
+std::unordered_map<std::string, void*> shared_data;
+StackTracer tracer;
 
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
 {
@@ -42,6 +46,24 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         std::wcerr << buffer << std::endl;
         return;
     }
+
+    if (!IsDebuggerPresent())
+        AddVectoredExceptionHandler(0, +[](PEXCEPTION_POINTERS ExceptionInfo) -> LONG {
+            if (ExceptionInfo->ExceptionRecord->ExceptionCode < 0x80000000) { // Not an error
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            if (ExceptionInfo->ExceptionRecord->ExceptionCode >= 0xE24C4A00
+                && ExceptionInfo->ExceptionRecord->ExceptionCode <= 0xE24C4AFF) { // LuaJIT
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            if (ExceptionInfo->ExceptionRecord->ExceptionCode == 0xE06D7363) { // C++
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            tracer.HandleException(ExceptionInfo);
+            std::cerr << "An uncaught exception occurred." << std::endl;
+            std::cerr << tracer.GetExceptionMsg() << std::endl;
+            return EXCEPTION_CONTINUE_SEARCH;
+        });
 
     lua::env::detail::inst = new lua::env::detail::_env {
         .should_exit = false,
@@ -63,7 +85,22 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         strcpy((char*)lua::env::detail::inst->exec_dir, exec_dir.c_str());
     }
     lua::env::detail::inst->close_state = +[](int(*f)(lua_State*)) {
-        on_close.emplace_back(f);
+        if (std::find_if(on_close.begin(), on_close.end(), [&](auto&& a) { return a == f; }) == on_close.end())
+            on_close.push_back(f);
+    };
+    lua::env::detail::inst->set_shared_data = +[](const char* key, void* data, size_t size) {
+        if (!data) {
+            shared_data.erase(key);
+            return;
+        }
+        if (shared_data.contains(key)) {
+            free(shared_data[key]);
+        }
+        shared_data[key] = malloc(size);
+        memcpy(shared_data[key], data, size);
+    };
+    lua::env::detail::inst->get_shared_data = +[](const char* key) -> void* {
+        return shared_data[key];
     };
     lua::env::detail::inst->new_state = +[]() -> lua_State* {
         lua::env::detail::inst->should_restart = false;
@@ -80,20 +117,18 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         globals::open(L);
         import_open(L);
 
-        LefFile::loaded.clear();
-
         {
             lua_getglobal(L, LUA_LOADLIBNAME);
             lua_getfield(L, -1, "loaders");
             lua_pushcclosure(L, +[](lua_State* L) -> int {
                 auto name = std::string(lua_tostring(L, 1));
                 for (auto&& lefs : LefFile::loaded)
-                for (auto&& file : lefs.files) {
-                    if (std::ranges::equal(file.name, name, ichar_equals) || std::ranges::equal(file.name, "modules." + name, ichar_equals)) {
-                        luaL_loadbuffer(L, file.data.c_str(), file.data.size(), ("=" + file.name).c_str());
-                        return 1;
+                    for (auto&& file : lefs.files) {
+                        if (std::ranges::equal(file.name, name, ichar_equals) || std::ranges::equal(file.name, "modules." + name, ichar_equals)) {
+                            luaL_loadbuffer(L, file.data.c_str(), file.data.size(), ("=" + file.name).c_str());
+                            return 1;
+                        }
                     }
-                }
                 return 0;
             }, 0);
             lua_rawseti(L, -2, lua_objlen(L, -2) + 1);
@@ -119,7 +154,16 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         on_close.clear();
         globals::start_time = std::chrono::high_resolution_clock::now();
         lua_State* L = lua::env::new_state();
-        func(L);
+        LefFile::loaded.clear();
+        if (!IsDebuggerPresent())
+            __try {
+                func(L);
+            } __except (tracer.ExceptionFilter(GetExceptionInformation())) {
+                std::cerr << "An exception occurred." << std::endl;
+                std::cerr << tracer.GetExceptionMsg() << std::endl;
+            }
+        else
+            func(L);
         for (auto&& f : on_close)
             f(L);
         lua_close(L);
@@ -148,10 +192,14 @@ void load_lua_memory(lua_State* L, const std::string& source, const std::string&
 void load_lef_file(lua_State* L, const std::string& path)
 {
     LefFile file = LefFile::load_from_file(path).value();
-    lua_createtable(L, file.args.size(), 0);
+    lua_createtable(L, file.args.size() + __argc - 1, 0);
     for (int j = 0; j < file.args.size(); j++) {
         lua_pushstring(L, file.args[j].c_str());
         lua_rawseti(L, -2, j + 1);
+    }
+    for (int j = 1; j < __argc; j++) {
+        lua_pushstring(L, __argv[j]);
+        lua_rawseti(L, -2, j + file.args.size());
     }
     lua_setglobal(L, "arg");
     load_lua_memory(L, file.files[0].data, file.files[0].name);
@@ -159,10 +207,14 @@ void load_lef_file(lua_State* L, const std::string& path)
 void load_lef_memory(lua_State* L, const std::string& data)
 {
     LefFile file = LefFile::load_from_memory(data).value();
-    lua_createtable(L, file.args.size(), 0);
+    lua_createtable(L, file.args.size() + __argc - 1, 0);
     for (int j = 0; j < file.args.size(); j++) {
         lua_pushstring(L, file.args[j].c_str());
         lua_rawseti(L, -2, j + 1);
+    }
+    for (int j = 1; j < __argc; j++) {
+        lua_pushstring(L, __argv[j]);
+        lua_rawseti(L, -2, j + file.args.size());
     }
     lua_setglobal(L, "arg");
     load_lua_memory(L, file.files[0].data, file.files[0].name);

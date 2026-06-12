@@ -5,8 +5,8 @@
 #ifndef LUAXE_LUA_ENV_H
 #define LUAXE_LUA_ENV_H
 
-#include <luaxe/env.h>
-#include <luaxe/bind.h>
+#include "shared/include/luaxe/env.h"
+#include "shared/include/luaxe/bind.h"
 
 namespace lua::env {
 static void open(lua_State*L) {

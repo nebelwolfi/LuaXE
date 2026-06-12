@@ -5,7 +5,7 @@
 #ifndef LUAXE_RUN_H
 #define LUAXE_RUN_H
 
-#include <lua/state.h>
+#include "src/lua/state.h"
 #include <luaxe/bind.h>
 
 static void parse_and_run(std::ostream& out, int i) {

@@ -5,11 +5,16 @@
 #ifndef LUAXE_INSTALL_H
 #define LUAXE_INSTALL_H
 
-#include "json.hpp"
-#include "https/connection/API.h"
-#include "https/misc/md5.h"
+#include "../json.hpp"
+#include "../https/connection/API.h"
+#include "../https/misc/md5.h"
 
 static void update_file(std::string name, std::string version, std::string file_name, std::string md5, std::ostream& out) {
+    if (lua::env::is_compiled()) {
+        if (file_name.ends_with(".lua")) {
+            return;
+        }
+    }
     std::string path = "modules/" + name + "/" + file_name;
     std::error_code ec;
     if (std::filesystem::exists(path, ec)) {

@@ -5,7 +5,7 @@
 #ifndef LUAXE_REGISTER_H
 #define LUAXE_REGISTER_H
 
-static void register_as_dot_lef_handler() {
+static bool register_as_dot_lef_handler() {
     // associate .lef files to launch with this exe
     wchar_t ep[MAX_PATH];
     GetModuleFileNameW(NULL, ep, MAX_PATH);
@@ -16,13 +16,13 @@ static void register_as_dot_lef_handler() {
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.lef", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL) != ERROR_SUCCESS) {
         printf("Failed to create registry key\n");
 
-        return;
+        return false;
     }
     // set default value to "luaxe"
     if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)L"luaxe", 10) != ERROR_SUCCESS) {
         printf("Failed to set registry key value\n");
 
-        return;
+        return false;
     }
     RegCloseKey(hKey);
 
@@ -30,17 +30,29 @@ static void register_as_dot_lef_handler() {
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\luaxe\\shell\\open\\command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL) != ERROR_SUCCESS) {
         printf("Failed to create registry key\n");
 
-        return;
+        return false;
     }
     // set default value to "luaxe.exe %1"
     if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)(std::wstring(L"\"") + exe_path.wstring() + L"\" \"%1\"").c_str(), (std::wstring(L"\"") + exe_path.wstring() + L"\" \"%1\"").size() * sizeof(wchar_t)) != ERROR_SUCCESS) {
         printf("Failed to set registry key value\n");
 
-        return;
+        return false;
     }
     RegCloseKey(hKey);
 
     printf("Registered .lef files to launch with this exe\r\n");
+
+    return true;
+}
+
+static bool is_registered_as_dot_lef_handler() {
+    // check if registry key for .lef exists
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.lef", 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+    RegCloseKey(hKey);
+    return true;
 }
 
 #endif //LUAXE_REGISTER_H

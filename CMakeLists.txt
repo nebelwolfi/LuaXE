@@ -14,47 +14,48 @@ include_directories(.) # for pch.h
 include_directories(shared/include)
 find_library(LUAJIT lua51 lib C:\\LuaJIT-2.1.M.64\\src\\)
 
-set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/appicon.rc"
-        commands/install.h
-        shared/include/luaxe/debug.h)
-file(GLOB_RECURSE https https/*.cpp https/*.h)
+file(GLOB_RECURSE https src/https/*.cpp src/https/*.h)
 
-add_executable(luaxe main.cpp
-        ${APP_ICON_RESOURCE_WINDOWS}
-        pch.cpp
+add_executable(lxe src/main.cpp
+        "res/appicon.rc"
+        src/commands/install.h
+        src/stack_tracer.cpp
+        src/stack_tracer.h
+        src/pch.cpp
         ${https}
-        commands/register.h
-        commands/update.h
-        commands/update.cpp
-        commands/compile.h
-        commands/run.h
-        lua/lef.h
-        lua/state.h
-        lua/state.cpp
-        lua/lef.cpp
-        lua/import.h
-        lua/globals.h
-        lua/env.h
+        src/commands/register.h
+        src/commands/update.h
+        src/commands/update.cpp
+        src/commands/compile.h
+        src/commands/run.h
+        src/lua/lef.h
+        src/lua/state.h
+        src/lua/state.cpp
+        src/lua/lef.cpp
+        src/lua/import.h
+        src/lua/globals.h
+        src/lua/env.h
+        src/is_path_in_PATH.cpp
 
+        shared/include/luaxe/debug.h
         shared/include/luaxe/bind.h
         shared/include/luaxe/env.h
         shared/include/luaxe/luaxe.hpp
 )
 
-target_link_libraries(luaxe LINK_PUBLIC ${LUAJIT} ws2_32.lib)
+target_link_libraries(lxe LINK_PUBLIC ${LUAJIT} ws2_32.lib dbghelp.lib)
 
-target_link_options(luaxe PRIVATE /PDB:luaxe.pdb)
-target_compile_options(luaxe PRIVATE "/Zi" PRIVATE "/O2")
-target_link_options(luaxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" PRIVATE "/INCREMENTAL" PRIVATE "/MACHINE:X64" PRIVATE "/LARGEADDRESSAWARE" PRIVATE "/LTCG"  PRIVATE "/DEBUG")
-set_target_properties(luaxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
-set_target_properties(luaxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
-add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "D:\\luaxe.dev\\public\\luaxe.exe")
-add_custom_command(TARGET luaxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/luaxe.exe" "${CMAKE_SOURCE_DIR}/bin/lxe.exe")
+target_link_options(lxe PRIVATE /PDB:lxe.pdb)
+target_compile_options(lxe PRIVATE "/Zi" PRIVATE "/O2")
+target_link_options(lxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" PRIVATE "/INCREMENTAL" PRIVATE "/MACHINE:X64" PRIVATE "/LARGEADDRESSAWARE" PRIVATE "/LTCG"  PRIVATE "/DEBUG")
+set_target_properties(lxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
+set_target_properties(lxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
+add_custom_command(TARGET lxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/lxe.exe" "${CMAKE_SOURCE_DIR}/bin/lxe.exe")
 
 # Precompiled headers
-target_precompile_headers(luaxe PRIVATE pch.h)
+target_precompile_headers(lxe PRIVATE src/pch.h)
 
 # Versioning
 add_custom_target(depender) # dummy target
 add_custom_command(TARGET depender PRE_BUILD COMMAND powershell -ExecutionPolicy Bypass -NoProfile -NonInteractive -File ${CMAKE_SOURCE_DIR}\\update_version.ps1 ${CMAKE_SOURCE_DIR}\\version.h)
-add_dependencies(luaxe depender)
+#add_dependencies(lxe depender)

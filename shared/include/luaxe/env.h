@@ -16,18 +16,22 @@ struct _env {
     const char* exec_dir = nullptr;
     lua_State*(*new_state)() = nullptr;
     void(*close_state)(int(*)(lua_State*)) = nullptr;
+    void(*set_shared_data)(const char*, void*, size_t) = nullptr;
+    void*(*get_shared_data)(const char*) = nullptr;
 };
 
 static _env* inst = nullptr;
 }
-static void init(lua_State* L) {
+static bool init(lua_State* L) {
     if (!detail::inst && L) {
         lua_getfield(L, LUA_REGISTRYINDEX, "_env");
         if (!lua_isnil(L, -1)) {
             detail::inst = *(detail::_env**)lua_touserdata(L, -1);
         }
         lua_pop(L, 1);
+        return detail::inst;
     }
+    return false;
 }
 
 static bool should_exit() {
@@ -53,6 +57,18 @@ static lua_State* new_state() {
 }
 static void on_close(int(*f)(lua_State*)) {
     detail::inst->close_state(f);
+}
+template<typename T>
+static void set(const char* key, T&& data) {
+    detail::inst->set_shared_data(key, &data, sizeof(T));
+}
+template<typename T>
+static void set(const char* key, T* data) {
+    detail::inst->set_shared_data(key, data, sizeof(T));
+}
+template<typename T>
+static T* get(const char* key) {
+    return detail::inst->get_shared_data(key);
 }
 }
 

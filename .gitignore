@@ -18,11 +18,11 @@ luac.out
 *.pch
 
 # Libraries
-LuaXE.lib
+*.lib
+*.pdb
 *.a
 *.la
 *.lo
-*.def
 *.exp
 
 # Shared objects (inc. Windows DLLs)
@@ -42,9 +42,29 @@ LuaXE.lib
 .idea
 .vs
 .cache
-cmake-build-*
+cmake-build-*/
+**/cmake-build-*/
 
 # Out dir
 out/*
 bin/*
 CMakeSettings.json
+
+*.exe
+
+*.png
+*.jpg
+*.bmp
+*.log
+*.tlog
+*.ogg
+*.wav
+*.mp3
+*.fbx
+
+projects/
+**/modules/**
+modules
+**/cache/
+**/old/
+**/old_/

@@ -1,10 +1,11 @@
 //
 // Created by Nebelwolfi on 08/05/2024.
 //
-#include <pch.h>
+#include "src/pch.h"
 #include "lef.h"
 
 std::vector<LefFile> LefFile::loaded = {};
+std::filesystem::path LefFile::bundled_dll_dir = {};
 
 std::optional<LefFile> LefFile::load_from_file(const std::string &path) {
     std::ifstream file(path, std::ios::binary);
@@ -24,11 +25,12 @@ std::optional<LefFile> LefFile::load_from_memory(const std::string &data) {
     }
 
     const auto* header = reinterpret_cast<const Header*>(data.data());
-    if (header->version != 0xd0d0) {
+    if (header->version != VERSION_V1 && header->version != VERSION_V2) {
         std::cerr << "Error: Invalid LEF file version" << std::endl;
         return std::nullopt;
     }
 
+    bool isV2 = header->version == VERSION_V2;
     LefFile lefFile;
 
     if (header->fileHeader.numFiles == 0) {
@@ -47,22 +49,32 @@ std::optional<LefFile> LefFile::load_from_memory(const std::string &data) {
         pos += sizeof(ArgHeader::Arg) + arg->length;
     }
 
-    //printf("first file: %d\n", header->fileHeader.firstFile);
-
     pos = data.data() + header->fileHeader.firstFile;
     for (auto i = 0; i < header->fileHeader.numFiles; i++) {
-        const auto* file = reinterpret_cast<const FileHeader::File*>(pos);
-        if (file->len == 0 || file->nameLen == 0) {
-            std::cerr << "Error: Invalid file length" << std::endl;
-            return std::nullopt;
+        if (isV2) {
+            const auto* file = reinterpret_cast<const FileHeader::FileV2*>(pos);
+            if (file->len == 0 || file->nameLen == 0) {
+                std::cerr << "Error: Invalid file length" << std::endl;
+                return std::nullopt;
+            }
+            lefFile.files.emplace_back(File{
+                .name = std::string(file->data, file->nameLen),
+                .data = std::string(file->data + file->nameLen, file->len),
+                .type = static_cast<FileType>(file->type)
+            });
+            pos += sizeof(FileHeader::FileV2) + file->len + file->nameLen;
+        } else {
+            const auto* file = reinterpret_cast<const FileHeader::File*>(pos);
+            if (file->len == 0 || file->nameLen == 0) {
+                std::cerr << "Error: Invalid file length" << std::endl;
+                return std::nullopt;
+            }
+            lefFile.files.emplace_back(File{
+                .name = std::string(file->data, file->nameLen),
+                .data = std::string(file->data + file->nameLen, file->len)
+            });
+            pos += sizeof(FileHeader::File) + file->len + file->nameLen;
         }
-        lefFile.files.emplace_back(File{
-            .name = std::string(file->data, file->nameLen),
-            .data = std::string(file->data + file->nameLen, file->len)
-        });
-        //printf("file %d: %d %d | name: %x => %s\n", i, file->len, file->nameLen, file->data - data.data(), lefFile.files.back().name.c_str());
-        //printf("namelen: %d | data: %x => %s\n", file->nameLen, file->data + file->nameLen - data.data(), file->data + file->nameLen);
-        pos += sizeof(FileHeader::File) + file->len + file->nameLen;
     }
 
     //printf("Loaded %d files\n", lefFile.files.size());
@@ -73,7 +85,7 @@ std::optional<LefFile> LefFile::load_from_memory(const std::string &data) {
     return lefFile;
 }
 
-void LefFile::store_as_lef(const std::string &outfile, const std::string& source, const std::string& main, const std::vector<std::string> &args, bool strip, bool verbose) {
+void LefFile::store_as_lef(const std::string &outfile, const std::string& source, const std::string& main, const std::vector<std::string> &args, const std::vector<std::string> &bundle_modules, bool strip, bool verbose) {
     std::ofstream file(outfile, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << outfile << std::endl;
@@ -152,7 +164,7 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
             } else if (path.extension() == ".lua") {
                 add_lua(path, path.string());
             } else if (!path.string().starts_with(".\\modules\\") && path.extension() != ".lef" && path.extension() != ".exe") {
-                // add_f(path, path.string()); // skip non-lua files
+                // skip non-lua files
             }
         };
         std::filesystem::path path(source);
@@ -172,11 +184,55 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
             std::cout << "Main file " << main << " not found, using " << files[0].name << " as main" << std::endl;
         }
     }
+
+    bool hasDlls = !bundle_modules.empty();
+    if (hasDlls) {
+        auto modules_path = std::filesystem::path("modules");
+        // Always bundle lua51.dll when bundling any DLL module
+        auto lua51_path = modules_path / "lua51.dll";
+        if (std::filesystem::exists(lua51_path)) {
+            std::ifstream input(lua51_path, std::ios::binary);
+            std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
+            input.close();
+            files.push_back(File{
+                .name = "modules/lua51.dll",
+                .data = std::string(buffer.begin(), buffer.end()),
+                .type = DLL_BINARY
+            });
+            if (verbose) std::cout << "[+dll] modules/lua51.dll (" << buffer.size() << " bytes)" << std::endl;
+        } else {
+            std::cerr << "Warning: lua51.dll not found at " << lua51_path << ", DLL modules may not work" << std::endl;
+        }
+
+        for (const auto& mod : bundle_modules) {
+            auto mod_dir = modules_path / mod;
+            if (!std::filesystem::exists(mod_dir)) {
+                std::cerr << "Warning: module directory " << mod_dir << " not found, skipping" << std::endl;
+                continue;
+            }
+            for (auto& entry : std::filesystem::recursive_directory_iterator(mod_dir)) {
+                if (!entry.is_regular_file()) continue;
+                if (entry.path().extension() != ".dll") continue;
+                auto rel_path = "modules/" + std::filesystem::relative(entry.path(), modules_path).string();
+                for (auto& c : rel_path) if (c == '\\') c = '/';
+                std::ifstream input(entry.path(), std::ios::binary);
+                std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
+                input.close();
+                files.push_back(File{
+                    .name = rel_path,
+                    .data = std::string(buffer.begin(), buffer.end()),
+                    .type = DLL_BINARY
+                });
+                if (verbose) std::cout << "[+dll] " << rel_path << " (" << buffer.size() << " bytes)" << std::endl;
+            }
+        }
+    }
+
     uint64_t totalArgSize = 0;
     for (const auto& arg : args)
         totalArgSize += sizeof(ArgHeader::Arg) + arg.size();
 
-    decltype(Header::version) version = 0xd0d0;
+    decltype(Header::version) version = hasDlls ? VERSION_V2 : VERSION_V1;
     file.write(reinterpret_cast<const char *>(&version), sizeof(version));
 
     auto numFiles = static_cast<unsigned short>(files.size());
@@ -194,14 +250,16 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         file.write(arg.data(), arg.size());
     }
 
-    uint64_t dataOff = firstFile + sizeof(FileHeader::File) * files.size() + 1;
     for (const auto& lf : files) {
+        if (hasDlls) {
+            unsigned char type = static_cast<unsigned char>(lf.type);
+            file.write(reinterpret_cast<const char *>(&type), sizeof(type));
+        }
         decltype(FileHeader::File::len) len = lf.data.size();
         decltype(FileHeader::File::nameLen) nameLen = lf.name.size();
         file.write(reinterpret_cast<const char *>(&len), sizeof(len));
         file.write(reinterpret_cast<const char *>(&nameLen), sizeof(nameLen));
         file.write(lf.name.data(), lf.name.size());
         file.write(lf.data.data(), lf.data.size());
-        dataOff += sizeof(FileHeader::File) + lf.data.size() + lf.name.size();
     }
 }
