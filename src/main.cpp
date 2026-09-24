@@ -114,8 +114,6 @@ int main(int argc, char** argv) {
                 }
             }
             //register_as_dot_lef_handler();
-            if (printed_header)
-                system("pause");
             return 0;
         }
 
@@ -139,7 +137,6 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "No valid options provided. Try \"luaxe help\"." << std::endl;
-    system("pause");
 
     return 0;
 }
