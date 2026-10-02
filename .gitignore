@@ -49,6 +49,8 @@ cmake-build-*/
 out/*
 bin/*
 CMakeSettings.json
+CMakeFiles
+CMakeCache.txt
 
 *.exe
 
