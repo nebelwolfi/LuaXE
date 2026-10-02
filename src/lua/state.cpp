@@ -7,6 +7,7 @@
 #include "env.h"
 #include "globals.h"
 #include "import.h"
+#include "lua_runtime.h"
 #include <csignal>
 #include "src/stack_tracer.h"
 
@@ -31,6 +32,19 @@ StackTracer tracer;
 
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
 {
+    // TB-195: ONE Lua runtime, bound before the first lua_* call. lxe.exe links
+    // no LuaJIT; this loads lua51.dll (beside the exe, then <exe>\modules, then
+    // the payload a compiled exe just extracted) and points every lua_* call at
+    // it, which is also the image every module's lua51dyn.lib import resolves to.
+    {
+        std::string runtime_error;
+        if (!lua_runtime::ensure(LefFile::bundled_dll_dir, &runtime_error)) {
+            std::cerr << "Error: no usable Lua runtime." << std::endl
+                      << "  " << runtime_error << std::endl;
+            std::exit(1);
+        }
+    }
+
     signal(SIGINT, sigIntHandler);
     if (GetConsoleWindow()) {
         SetConsoleOutputCP(65001), SetConsoleCP(65001);

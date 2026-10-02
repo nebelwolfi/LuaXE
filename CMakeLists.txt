@@ -12,7 +12,16 @@ set_property(GLOBAL PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 include_directories(.) # for pch.h
 include_directories(shared/include)
-find_library(LUAJIT lua51 lib C:\\LuaJIT-2.1.M.64\\src\\)
+# TB-195: ONE Lua runtime. lxe.exe links NO LuaJIT - not the static
+# C:\LuaJIT-2.1.M.64\src\lua51.lib, not shared/lib/lua51dyn.lib. The runtime is
+# loaded at RUN time (LoadLibrary + GetProcAddress) by src/lua/lua_runtime.cpp
+# and every lua_* in lxe is a forwarding stub into it, so the exe and every
+# module share ONE lua51.dll in one address space. shared/lib/lua51dyn.lib stays
+# the import library the MODULES use (thread.dll, network.dll, ...) and is the
+# import library that describes the DLL this exe loads.
+# FORCE so a re-configure picks up a changed LUA51_DLL instead of keeping the
+# first (possibly empty) value forever.
+set(LUA51_DLL "$ENV{LUA51_DLL}" CACHE FILEPATH "lua51.dll to stage next to lxe.exe (TB-195)" FORCE)
 
 file(GLOB_RECURSE https src/https/*.cpp src/https/*.h)
 
@@ -33,6 +42,8 @@ add_executable(lxe src/main.cpp
         src/lua/state.cpp
         src/lua/lef.cpp
         src/lua/import.h
+        src/lua/lua_runtime.h
+        src/lua/lua_runtime.cpp
         src/lua/globals.h
         src/lua/env.h
         src/is_path_in_PATH.cpp
@@ -43,7 +54,11 @@ add_executable(lxe src/main.cpp
         shared/include/luaxe/luaxe.hpp
 )
 
-target_link_libraries(lxe LINK_PUBLIC ${LUAJIT} ws2_32.lib dbghelp.lib)
+# TB-195: no LuaJIT library at all - the runtime is loaded at run time by
+# src/lua/lua_runtime.cpp. bcrypt.dll is the OS's SHA-256, used to verify the
+# runtime before it is loaded (it is in every Windows, and it is a delay-free
+# import the OS resolves before main()).
+target_link_libraries(lxe LINK_PUBLIC ws2_32.lib dbghelp.lib bcrypt.lib)
 
 target_link_options(lxe PRIVATE /PDB:lxe.pdb)
 target_compile_options(lxe PRIVATE "/Zi" PRIVATE "/O2")
@@ -51,6 +66,12 @@ target_link_options(lxe PRIVATE "/nologo" PRIVATE "/OPT:REF" PRIVATE "/OPT:ICF" 
 set_target_properties(lxe PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE")
 set_target_properties(lxe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/")
 add_custom_command(TARGET lxe POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/bin/lxe.exe" "${CMAKE_SOURCE_DIR}/bin/lxe.exe")
+# TB-195: stage the runtime the exe will load at run time, so a dev build starts
+# without a download. Only when the caller says which build it wants.
+if(LUA51_DLL AND EXISTS "${LUA51_DLL}")
+    add_custom_command(TARGET lxe POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LUA51_DLL}" "$<TARGET_FILE_DIR:lxe>/lua51.dll")
+endif()
 
 # Precompiled headers
 target_precompile_headers(lxe PRIVATE src/pch.h)

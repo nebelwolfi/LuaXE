@@ -11,6 +11,7 @@
 #include <sys/utime.h>
 #include "../commands/install.h"
 #include <unordered_set>
+#include "lua_runtime.h"
 
 extern "C" int ll_loadfunc(lua_State *L, const char *path, const char *name, int r);
 
@@ -119,14 +120,17 @@ static int import(lua_State* L) {
             lua_setfield(L, -2, "cpath");
             lua_pop(L, 1);
         }
-        if (!use_bundled && !std::filesystem::exists(std::filesystem::current_path() / "modules" / "lua51.dll")) {
-            API a;
-            if (!a.DownloadFile("luaxe.dev", "/module/lua51.dll", (std::filesystem::current_path() / "modules" / "lua51.dll").string())) {
-                lua_pushstring(L, "Failed to download lua51.dll");
-                lua_error(L);
-                return 0;
-            } else
-                AddDllDirectory((std::filesystem::current_path() / "modules").wstring().c_str());
+        // TB-195: no download here any more. The runtime is bound once, before any
+        // state exists (lua_runtime::ensure, called from load_lua_state_and_run
+        // and LefFile::store_as_lef), verified against a pinned SHA-256 and
+        // cached beside the executable. This path could only fire if a lua_State
+        // existed without it, which is impossible - and it would have downloaded
+        // an UNVERIFIED runtime into the working directory, which is exactly the
+        // hole the one-runtime change closes.
+        if (!lua_runtime::loaded()) {
+            lua_pushstring(L, "the Lua runtime is not loaded; this is a LuaXE bug");
+            lua_error(L);
+            return 0;
         }
         AddDllDirectory((modules_base / modulename).wstring().c_str());
         if (ll_loadfunc(L, ((modules_base / modulename / name_after_dot).string() + ".dll").c_str(), name.c_str(), 0)) {

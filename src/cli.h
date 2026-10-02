@@ -17,6 +17,12 @@ namespace CommandLineInterface {
                     [](std::ostream& out, int i)
                     {
                         out << "LuaXE [Version " LuaXE_VERSION "]" << std::endl;
+                        // TB-195: which LuaJIT this build uses. Cheap, needs no Lua,
+                        // and it is the one-image invariant made observable: the exe
+                        // links no LuaJIT, so when Lua IS needed it is always
+                        // lua51.dll. (This command itself runs no Lua, so nothing is
+                        // loaded here by design.)
+                        out << lua_runtime::diagnostics() << std::endl;
                     }
             },
             {
