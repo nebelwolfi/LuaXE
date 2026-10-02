@@ -6,12 +6,27 @@
 #include "commands/run.h"
 #include "commands/install.h"
 #include "lua/state.h"
+#include "lua/lua_runtime.h"
 #include <luaxe/bind.h>
 #include "cli.h"
 #include "path.h"
 
 int main(int argc, char** argv) {
     AddDllDirectory((std::filesystem::current_path() / "modules").wstring().c_str());
+
+    // TB-195: ONE Lua runtime. lxe.exe links no LuaJIT; the runtime is loaded
+    // at run time, before ANY lua_* call. The require lives in the two places
+    // that can reach Lua - load_lua_state_and_run() and LefFile::store_as_lef()
+    // - so a command that never touches Lua (`luaxe help`, `luaxe version`,
+    // `luaxe register`) neither downloads nor needs a runtime at all. The first
+    // call wins; the second is a no-op.
+    std::string runtime_error;
+    auto require_lua_runtime = [&runtime_error](const std::filesystem::path& bundled) {
+        if (lua_runtime::ensure(bundled, &runtime_error)) return;
+        std::cerr << "Error: no usable Lua runtime." << std::endl
+                  << "  " << runtime_error << std::endl;
+        std::exit(1);
+    };
 
     // argv might be missing .exe extension
     char exe_path[256] = { 0 };
@@ -64,6 +79,11 @@ int main(int argc, char** argv) {
                     LefFile::loaded.clear();
                 }
             }
+
+            // TB-195: the payload's own lua51.dll is one of the runtime's
+            // candidates, so bind it before the state that runs this payload is
+            // created.
+            require_lua_runtime(LefFile::bundled_dll_dir);
 
             load_lua_state_and_run([&](lua_State* L) {
                 load_lef_memory(L, std::string(buffer.begin(), buffer.end()));

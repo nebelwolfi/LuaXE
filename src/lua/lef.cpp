@@ -3,6 +3,7 @@
 //
 #include "src/pch.h"
 #include "lef.h"
+#include "lua_runtime.h"
 
 std::vector<LefFile> LefFile::loaded = {};
 std::filesystem::path LefFile::bundled_dll_dir = {};
@@ -91,7 +92,19 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         std::cerr << "Error: Could not open file " << outfile << std::endl;
         return;
     }
-    if (outfile.find(".exe") != std::string::npos) {
+    bool is_exe = outfile.find(".exe") != std::string::npos;
+    // TB-195: `lxe compile` creates a state of its own to dump the sources, so
+    // the runtime has to be bound here too - but only when the file being built
+    // IS this executable (a .lef archive needs no runtime).
+    if (is_exe) {
+        std::string runtime_error;
+        if (!lua_runtime::ensure({}, &runtime_error)) {
+            std::cerr << "Error: no usable Lua runtime, cannot compile." << std::endl
+                      << "  " << runtime_error << std::endl;
+            return;
+        }
+    }
+    if (is_exe) {
         wchar_t exe_path[MAX_PATH];
         GetModuleFileNameW(NULL, exe_path, MAX_PATH);
         std::ifstream input(exe_path, std::ios::binary);
@@ -185,10 +198,17 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         }
     }
 
-    bool hasDlls = !bundle_modules.empty();
+    // TB-195: an .exe ALWAYS carries the runtime it will load at start-up, even
+    // without -b: lxe.exe links no LuaJIT, so a compiled app that did not embed
+    // modules/lua51.dll would have nothing to run on and could not even reach a
+    // download on a locked-down machine. .lef output keeps the old rule (bundle
+    // only what -b asked for).
+    bool hasDlls = !bundle_modules.empty()
+        || (is_exe && std::filesystem::exists(std::filesystem::path("modules") / "lua51.dll"));
     if (hasDlls) {
         auto modules_path = std::filesystem::path("modules");
-        // Always bundle lua51.dll when bundling any DLL module
+        // Always bundle lua51.dll when bundling any DLL module: the exe loads it
+        // at run time (TB-195) and every module resolves `lua51.dll` to it.
         auto lua51_path = modules_path / "lua51.dll";
         if (std::filesystem::exists(lua51_path)) {
             std::ifstream input(lua51_path, std::ios::binary);
@@ -201,7 +221,8 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
             });
             if (verbose) std::cout << "[+dll] modules/lua51.dll (" << buffer.size() << " bytes)" << std::endl;
         } else {
-            std::cerr << "Warning: lua51.dll not found at " << lua51_path << ", DLL modules may not work" << std::endl;
+            std::cerr << "Warning: lua51.dll not found at " << lua51_path << ", the built executable will "
+                << "have to find or download its Lua runtime at start-up" << std::endl;
         }
 
         for (const auto& mod : bundle_modules) {
