@@ -8,7 +8,6 @@
 #include "../https/connection/API.h"
 #include "../https/misc/json.hpp"
 #include "../https/misc/md5.h"
-#include <sys/utime.h>
 #include "../commands/install.h"
 #include <unordered_set>
 #include "lua_runtime.h"
@@ -26,48 +25,113 @@ int lua_pushandstore(lua_State *L, const char *name) {
     return 1;
 }
 
-std::unordered_map<std::string, std::mutex> fs_mutexes;
-
 static __forceinline bool ichar_equals(char a, char b)
 {
     return std::tolower(static_cast<unsigned char>(a)) ==
            std::tolower(static_cast<unsigned char>(b));
 }
 
-std::unordered_set<std::string> installed_modules;
-
 // Resolution and installation are serialized per process: two states importing
-// at once must not race on installed_modules or on the files being written.
-// The module itself is loaded outside the lock (its luaopen may import more).
+// at once must not race on the store. The module itself is loaded outside the
+// lock (its luaopen may import more).
 static std::mutex import_mutex;
 
-// Where import() looks for a module, in order (src/lua/modules_dir.h):
-//   - a module the running payload BUNDLES: the modules directory only, never
-//     installed or updated - the payload's own copy wins over any other;
-//   - a compiled program (an .exe, or `lxe run x.lef`): the modules directory
-//     only. Its cwd is the user's workspace, not a place to load DLLs from;
-//   - a source run: the project's own <cwd>\modules first (what `lxe install`
-//     manages), then the modules directory.
-// A module found nowhere is installed into the modules directory - never into
-// whatever directory the program happened to be started from.
-static std::vector<std::filesystem::path> import_roots(const std::string& modulename, bool compiled) {
-    if (LefFile::bundled_modules.contains(modulename)) return { modules_dir::home() };
-    std::vector<std::filesystem::path> roots;
-    if (!compiled) {
-        std::error_code ec;
-        auto cwd = std::filesystem::current_path(ec);
-        if (!ec) roots.push_back(cwd / "modules");
-    }
-    roots.push_back(modules_dir::home());
-    return roots;
-}
+// The folder each module name resolved to in this process, so a later
+// `require("name.sub")` (a module's own Lua files) finds name\sub.lua there.
+static std::map<std::string, std::filesystem::path> resolved_dirs;
 
-/// A module name import() may join into a modules root: no separators, no
-/// drive, no `..` - it names a folder INSIDE the root, never one above it.
+/// A module name import() may join into a folder: no separators, no drive, no
+/// `..` - it names a folder INSIDE a root, never one above it.
 static bool valid_import_name(const std::string& name) {
     if (name.empty() || name.find_first_of("/\\:") != std::string::npos) return false;
     if (name.find("..") != std::string::npos) return false;
     return name.front() != '.' && name.back() != '.';
+}
+
+/// Where `import(name, version)` loads from (src/lua/modules_dir.h), in order:
+///   1. a module the running app BUNDLES: its folder next to the app - never
+///      installed or updated, whatever version was asked for;
+///   2. a source run only: a flat <root>\modules\<name>\ (the layout before
+///      the store, and what a checkout stages): the cwd's, the script's own
+///      folder's, then the lxe executable's (modules_dir::source_roots);
+///   3. lxe's store, ~\.lxe\modules\<name>\<version>\:
+///        "1.2.3"          that version, installed if it is missing
+///        a range ">=1", "^1.2" ...  the best installed match, else the best
+///                         published one is installed
+///        "local"          the highest installed version, never the network
+///        nil              the project's pin (./modules/module.json) in a
+///                         source run; otherwise in a compiled program the
+///                         highest installed version, else the latest is
+///                         installed; in a source run with no pin, "latest"
+///        "latest"         the registry's latest (asked at most once a day),
+///                         installed if missing; offline, the highest installed
+/// Returns the folder, or empty with `why` set.
+static std::filesystem::path resolve_module(const std::string& name, const std::string& asked, bool compiled, std::string* why) {
+    if (auto bundled = LefFile::bundled_modules.find(name); bundled != LefFile::bundled_modules.end()) {
+        std::error_code ec;
+        if (!bundled->second.empty() && std::filesystem::is_directory(bundled->second, ec)) return bundled->second;
+        *why = "it is bundled, but could not be unpacked next to the app (see the warning at start-up)";
+        return {};
+    }
+    if (!compiled) {
+        std::error_code ec;
+        for (const auto& root : modules_dir::source_roots())
+            if (std::filesystem::is_directory(root / name, ec)) return root / name;
+    }
+    std::string request = asked;
+    if (request.empty() && !compiled) request = project_pin(name);
+    if (request.empty()) request = compiled ? "installed-or-latest" : "latest";
+
+    if (request == "local") {
+        auto dir = modules_dir::best_installed(name, "*");
+        if (dir.empty()) *why = "no version is installed in " + (modules_dir::store() / name).string() + " (\"local\" never downloads)";
+        return dir;
+    }
+    if (request == "installed-or-latest") {
+        auto dir = modules_dir::best_installed(name, "*");
+        if (!dir.empty()) return dir;
+        request = "latest";
+    }
+    auto dir = install_into_store(name, request, std::cout);
+    if (!dir.empty()) return dir;
+    if (request == "latest") {
+        // offline: what is there
+        dir = modules_dir::best_installed(name, "*");
+        if (!dir.empty()) return dir;
+    }
+    *why = "no version matching \"" + request + "\" is installed in " + (modules_dir::store() / name).string()
+        + " and it could not be installed";
+    return {};
+}
+
+/// package.loaders entry: `require("name.sub.file")` for a module import()
+/// resolved, from <its folder>\sub\file.lua (a module's own Lua files).
+static int resolved_module_searcher(lua_State* L) {
+    std::string wanted = luaL_checkstring(L, 1);
+    auto dot = wanted.find('.');
+    if (dot == std::string::npos) return 0;
+    auto head = wanted.substr(0, dot);
+    std::transform(head.begin(), head.end(), head.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    std::filesystem::path dir;
+    {
+        std::lock_guard lock(import_mutex);
+        auto found = resolved_dirs.find(head);
+        if (found == resolved_dirs.end()) return 0;
+        dir = found->second;
+    }
+    auto rest = wanted.substr(dot + 1);
+    // a dotted name only: no separators, drive or `..` out of the folder
+    if (rest.empty() || rest.find_first_of("/\\:") != std::string::npos || rest.find("..") != std::string::npos
+        || rest.front() == '.' || rest.back() == '.') return 0;
+    std::replace(rest.begin(), rest.end(), '.', '\\');
+    for (const auto& candidate : { dir / (rest + ".lua"), dir / rest / "init.lua" }) {
+        std::error_code ec;
+        if (!std::filesystem::exists(candidate, ec)) continue;
+        if (luaL_loadfile(L, candidate.string().c_str()) != 0) return lua_error(L);
+        return 1;
+    }
+    lua_pushstring(L, ("\n\tno file '" + (dir / (rest + ".lua")).string() + "'").c_str());
+    return 1;
 }
 
 static int import(lua_State* L) {
@@ -77,21 +141,8 @@ static int import(lua_State* L) {
     if (!valid_import_name(name))
         return luaL_error(L, "import: \"%s\" is not a module name", name.c_str());
     const bool compiled = lua::env::is_compiled();
-    std::string version = "latest";
-    if (lua_isstring(L, 2))
-        version = lua_tostring(L, 2);
-    else {
-        // A pinned version: the first modules root that has a module.json.
-        auto pin_name = name.substr(0, name.find('.'));
-        for (const auto& root : import_roots(pin_name, compiled)) {
-            std::error_code ec;
-            if (!std::filesystem::exists(root / "module.json", ec)) continue;
-            auto j = read_module_json(root);
-            if (j.contains("dependencies") && j["dependencies"].contains(name) && j["dependencies"][name].is_string())
-                version = j["dependencies"][name].get<std::string>();
-            break;
-        }
-    }
+    std::string version;
+    if (lua_isstring(L, 2)) version = lua_tostring(L, 2);
     {
         // check if its already in package.modules
         lua_getglobal(L, "package");
@@ -116,49 +167,42 @@ static int import(lua_State* L) {
         name_after_dot = name.substr(name.find('.')+1);
         bHasDot = true;
     }
-    const bool bundled = LefFile::bundled_modules.contains(modulename);
-    const auto roots = import_roots(modulename, compiled);
-    auto find_root = [&]() -> std::filesystem::path {
-        for (const auto& root : roots) {
-            std::error_code ec;
-            if (std::filesystem::exists(root / modulename, ec)) return root;
-        }
-        return {};
-    };
-    std::filesystem::path root;
+    std::filesystem::path dir;
+    std::string why;
     {
         std::lock_guard lock(import_mutex);
-        root = find_root();
-        bool bShouldUpdate = true;
-        if (bundled) {
-            bShouldUpdate = false;
-        } else if (!bHasDot && (version == "local" || compiled)) {
-            bShouldUpdate = root.empty();
-        }
-        if (bShouldUpdate && !installed_modules.contains(modulename)) {
-            // Marked done only when it worked: a failed install (offline, an
-            // unwritable folder) is tried again by the next import.
-            if (install_module(modulename + "@" + version, root.empty() ? modules_dir::home() : root))
-                installed_modules.insert(modulename);
-            root = find_root();
+        auto known = resolved_dirs.find(modulename);
+        // One folder per module per process: a second import of a module that
+        // already resolved (another of its files, or the same name again) uses it.
+        if (known != resolved_dirs.end()) {
+            dir = known->second;
+            // A store version folder that does not satisfy what is asked now:
+            // say so (a process holds one version of a module).
+            auto folder = dir.filename().string();
+            if (!version.empty() && version != "local" && version != "latest" && modules_dir::is_version(folder)
+                && !modules_dir::satisfies(folder, version)) {
+                return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
+                    modulename.c_str(), folder.c_str(), version.c_str());
+            }
+        } else {
+            dir = resolve_module(modulename, version, compiled, &why);
+            if (!dir.empty()) resolved_dirs[modulename] = dir;
         }
     }
-    if (root.empty()) {
-        // Found nowhere and not installable: say so, instead of answering nil.
-        std::string where;
-        for (const auto& candidate : roots) where += (where.empty() ? "" : ", ") + candidate.string();
-        return luaL_error(L, "import: module \"%s\" is not installed in %s%s", modulename.c_str(), where.c_str(),
-            bundled ? " (it is bundled, but could not be unpacked there)" : " and could not be installed");
-    }
+    if (dir.empty())
+        return luaL_error(L, "import: module \"%s\": %s", modulename.c_str(), why.c_str());
     std::error_code ec;
-    bool isDllInclude = std::filesystem::exists(root / modulename / (name_after_dot + ".dll"), ec);
-    if (!isDllInclude && !bHasDot) {
-        bool hasLuaFile = std::filesystem::exists(root / modulename / (name_after_dot + ".lua"), ec);
-        if (!hasLuaFile) {
-            // probably tried to just install a non-dll module, no need to load anything
-            return 0;
+    auto file_stem = name_after_dot;
+    std::replace(file_stem.begin(), file_stem.end(), '.', '\\');
+    bool isDllInclude = std::filesystem::exists(dir / (file_stem + ".dll"), ec);
+    std::filesystem::path lua_file;
+    if (!isDllInclude) {
+        lua_file = dir / (file_stem + ".lua");
+        if (!std::filesystem::exists(lua_file, ec)) {
+            if (!bHasDot) return 0; // a module with nothing to load (installed for its files)
+            return luaL_error(L, "import: module \"%s\" has no %s(.dll|.lua) in %s", modulename.c_str(),
+                file_stem.c_str(), dir.string().c_str());
         }
-        name = modulename + "." + name_after_dot; // try to load lua file instead
     }
     // The module sees its own arguments as `arg` while it loads; the caller's
     // `arg` is restored afterwards - also when the module raises. The saved value
@@ -176,14 +220,13 @@ static int import(lua_State* L) {
     int status = 0;
     if (isDllInclude)
     {
-        auto modules_base = root;
         {
             lua_getglobal(L, "package");
             lua_getfield(L, -1, "cpath");
             const char* current = lua_tostring(L, -1);
             std::string cpath = current ? current : "";
             lua_pop(L, 1);
-            cpath += ";" + (modules_base / modulename).string() + "\\?.dll";
+            cpath += ";" + dir.string() + "\\?.dll";
             lua_pushstring(L, cpath.c_str());
             lua_setfield(L, -2, "cpath");
             lua_pop(L, 1);
@@ -202,9 +245,9 @@ static int import(lua_State* L) {
             lua_error(L);
             return 0;
         }
-        AddDllDirectory((modules_base / modulename).wstring().c_str());
+        AddDllDirectory(dir.wstring().c_str());
         const int top = lua_gettop(L);
-        if (ll_loadfunc(L, ((modules_base / modulename / name_after_dot).string() + ".dll").c_str(), name.c_str(), 0)) {
+        if (ll_loadfunc(L, (dir / (file_stem + ".dll")).string().c_str(), name.c_str(), 0)) {
             lua_settop(L, top);
             lua_getglobal(L, "require");
             lua_pushstring(L, name.c_str());
@@ -219,9 +262,21 @@ static int import(lua_State* L) {
             status = lua_pcall(L, 0, 1, 0);
         }
     } else {
-        lua_getglobal(L, "require");
-        lua_pushstring(L, name.c_str());
-        status = lua_pcall(L, 1, 1, 0);
+        // A Lua file of the module: loaded from its folder and kept in
+        // package.loaded under its dotted name, like require would.
+        status = luaL_loadfile(L, lua_file.string().c_str());
+        if (status == 0) {
+            lua_pushstring(L, name.c_str());
+            status = lua_pcall(L, 1, 1, 0);
+            if (status == 0) {
+                if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 1); }
+                lua_getglobal(L, "package");
+                lua_getfield(L, -1, "loaded");
+                lua_pushvalue(L, -3);
+                lua_setfield(L, -2, name.c_str());
+                lua_pop(L, 2);
+            }
+        }
     }
     lua_pushvalue(L, saved_arg);
     lua_setglobal(L, "arg");
@@ -232,6 +287,15 @@ static int import(lua_State* L) {
 static int import_open(lua_State* L) {
     lua_pushcfunction(L, import);
     lua_setglobal(L, "import");
+    // require("name.sub") for a module import() resolved: its own Lua files.
+    lua_getglobal(L, LUA_LOADLIBNAME);
+    lua_getfield(L, -1, "loaders");
+    // APPENDED, after the stock searchers: programs index package.loaders by
+    // position (loaders[2] is Lua's path searcher), so lxe never reorders it.
+    // It only answers names whose head import() resolved.
+    lua_pushcfunction(L, resolved_module_searcher);
+    lua_rawseti(L, -2, (int)lua_objlen(L, -2) + 1);
+    lua_pop(L, 2);
     return 0;
 }
 

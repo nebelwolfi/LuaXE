@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "src/lua/modules_dir.h"
 #include <version.h>
 #include "commands/register.h"
 #include "commands/update.h"
@@ -52,7 +53,9 @@ int main(int argc, char** argv) {
             std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
             input.close();
 
-            // Pre-parse the LEF to extract bundled DLLs before Lua runs
+            // Pre-parse the LEF to extract bundled DLLs before Lua runs; they
+            // unpack next to this exe (<exe dir>\modules\<name>\<version>\).
+            modules_dir::set_app_dir(modules_dir::exe_dir());
             if (!LefFile::extract_bundled_dlls(std::string(buffer.begin(), buffer.end()))) {
                 std::cerr << "Error: this executable's payload is not a valid .lef (the file is damaged)" << std::endl;
                 return 1;

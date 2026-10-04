@@ -9,6 +9,7 @@
 //
 #include "src/pch.h"
 #include "src/lua/lua_runtime.h"
+#include "src/lua/modules_dir.h"
 #include "src/https/connection/API.h"
 #include <bcrypt.h>
 
@@ -387,15 +388,16 @@ HMODULE module = LoadLibraryExW(file.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_
     return true;
 }
 
-// Download into the executable's own modules directory, never the working
-// directory: for a project run the working directory is a source tree (TB-190).
+// Download into lxe's own bin directory (%USERPROFILE%\.lxe\bin), never the
+// working directory: for a project run the working directory is a source tree
+// (TB-190).
 //
 // Atomic: the download lands on lua51.dll.<pid>.tmp, is verified THERE, and only
 // then replaces the final file. Two lxe processes starting cold therefore never
 // hand a half-written DLL to the loader or to each other's hash check, and a
 // failed or unverified download leaves nothing behind but the temp file.
 bool download(std::string* error) {
-    std::filesystem::path target = exe_dir() / "modules" / lua_runtime::kDllName;
+    std::filesystem::path target = modules_dir::bin() / lua_runtime::kDllName;
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) {
@@ -509,6 +511,21 @@ bool verify(const std::filesystem::path& file, std::string* reason) {
     return true;
 }
 
+bool known_good_bytes(const std::string& data) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return false;
+    unsigned char digest[32];
+    bool ok = BCryptHash(algorithm, nullptr, 0, (PUCHAR)data.data(), (ULONG)data.size(), digest, sizeof(digest)) == 0;
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (!ok) return false;
+    char hex[65];
+    for (int i = 0; i < 32; i++) std::snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    for (auto candidate : kKnownGood) {
+        if (std::string(hex) == candidate) return true;
+    }
+    return false;
+}
+
 bool known_good(const std::filesystem::path& file) {
     auto hash = sha256(file);
     if (hash.empty()) return false;
@@ -529,15 +546,20 @@ bool ensure(const std::filesystem::path& bundled_dir, std::string* error) {
         return false;
     }
 
+    // In order: beside this executable (a standalone lxe in ~\.lxe\bin has
+    // it right there), lxe's own bin (~\.lxe\bin - the runtime every lxe and
+    // app shares), the runtime the running app carries (unpacked into
+    // <app dir>\modules), the older <exe dir>\modules cache, an explicit extra
+    // directory; then a download into ~\.lxe\bin. Every one is hash-verified.
     const auto beside = exe_dir();
     std::vector<std::filesystem::path> candidates = {
         beside / lua_runtime::kDllName,
-        beside / "modules" / lua_runtime::kDllName,
+        modules_dir::bin() / lua_runtime::kDllName,
     };
+    if (!modules_dir::app_dir().empty())
+        candidates.push_back(modules_dir::app_dir() / "modules" / lua_runtime::kDllName);
+    candidates.push_back(beside / "modules" / lua_runtime::kDllName);
     if (!bundled_dir.empty()) {
-        // An explicit extra directory (no caller passes one today: a payload's
-        // runtime is unpacked into <exe>\modules, the second candidate above).
-        // Both shapes are tried.
         candidates.push_back(bundled_dir / lua_runtime::kDllName);
         candidates.push_back(bundled_dir / "modules" / lua_runtime::kDllName);
     }

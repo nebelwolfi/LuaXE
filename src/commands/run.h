@@ -8,6 +8,7 @@
 #include "src/lua/state.h"
 #include "src/lua/lef.h"
 #include "src/lua/env.h"
+#include "src/lua/modules_dir.h"
 #include <luaxe/bind.h>
 
 /// Case-insensitive extension test ("x.LEF" is a .lef).
@@ -47,6 +48,13 @@ static void parse_and_run(std::ostream& out, int i) {
     // bound and the state exists, and it runs as compiled, so import() and the
     // app resolve the bundled modules instead of looking for them on disk.
     bool is_lef = has_extension(source, ".lef");
+    if (!is_lef) {
+        // A source run also finds flat modules\ next to the script it runs (a
+        // checkout started from another folder), see modules_dir::source_roots.
+        std::error_code ec;
+        auto script = std::filesystem::weakly_canonical(std::filesystem::absolute(source, ec), ec);
+        if (!ec) modules_dir::set_script_dir(script.parent_path());
+    }
     if (is_lef) {
         std::ifstream input(source, std::ios::binary);
         if (!input.is_open()) {
@@ -59,6 +67,8 @@ static void parse_and_run(std::ostream& out, int i) {
         auto canonical = std::filesystem::weakly_canonical(std::filesystem::absolute(source, ec), ec);
         if (ec) canonical = std::filesystem::absolute(source, ec).lexically_normal();
         lua::env::lef_path = canonical.string();
+        // The app's own folder: what it bundles unpacks next to it.
+        modules_dir::set_app_dir(canonical.parent_path());
         if (!LefFile::extract_bundled_dlls(std::string(std::istreambuf_iterator<char>(input), {}))) {
             std::cerr << "Error: " << source << " is not a valid .lef file" << std::endl;
             std::exit(1);

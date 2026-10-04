@@ -5,9 +5,10 @@
 #include "lef.h"
 #include "lua_runtime.h"
 #include "modules_dir.h"
+#include "src/json.hpp"
 
 std::vector<LefFile> LefFile::loaded = {};
-std::set<std::string> LefFile::bundled_modules = {};
+std::map<std::string, std::filesystem::path> LefFile::bundled_modules = {};
 
 std::optional<LefFile> LefFile::load_from_file(const std::string &path) {
     std::ifstream file(path, std::ios::binary);
@@ -109,6 +110,34 @@ std::string lowercase(std::string text) {
     return text;
 }
 
+/// The version a bundled module is recorded under: its own module.json's
+/// "version", else the exact version the project pins in modules/module.json,
+/// else "local-<first 8 hex of the sha256 of <name>.dll>" - a build that was
+/// never published still gets a stable folder of its own per build.
+std::string bundle_version(const std::filesystem::path& modules_path, const std::string& name, const std::filesystem::path& dir) {
+    auto read = [](const std::filesystem::path& file) -> nlohmann::json {
+        std::error_code ec;
+        if (!std::filesystem::exists(file, ec)) return nlohmann::json::object();
+        try { return nlohmann::json::parse(std::ifstream(file)); } catch (const std::exception&) {}
+        return nlohmann::json::object();
+    };
+    auto own = read(dir / "module.json");
+    if (own.is_object() && own.contains("version") && own["version"].is_string()
+        && modules_dir::is_version(own["version"].get<std::string>()))
+        return own["version"].get<std::string>();
+    auto project = read(modules_path / "module.json");
+    if (project.is_object() && project.contains("dependencies") && project["dependencies"].is_object()) {
+        auto& deps = project["dependencies"];
+        for (auto it = deps.begin(); it != deps.end(); ++it) {
+            if (lowercase(it.key()) == lowercase(name) && it->is_string()
+                && modules_dir::is_version(it->get<std::string>()))
+                return it->get<std::string>();
+        }
+    }
+    auto hash = lua_runtime::sha256(dir / (name + ".dll"));
+    return "local-" + (hash.size() >= 8 ? hash.substr(0, 8) : std::string("00000000"));
+}
+
 } // namespace
 
 bool LefFile::extract_bundled_dlls(const std::string& lef_data) {
@@ -120,7 +149,8 @@ bool LefFile::extract_bundled_dlls(const std::string& lef_data) {
     // Every failure below is reported, never thrown out of main; the payload
     // still runs.
     const auto exe_dir = modules_dir::exe_dir();
-    const auto home = exe_dir / "modules";
+    const auto app = modules_dir::app_dir().empty() ? exe_dir : modules_dir::app_dir();
+    const auto home = app / "modules";
     for (const auto& f : preview->files) {
         if (f.type != LefFile::DLL_BINARY) continue;
         if (!safe_bundled_name(f.name)) {
@@ -129,25 +159,55 @@ bool LefFile::extract_bundled_dlls(const std::string& lef_data) {
             continue;
         }
         auto relative = std::filesystem::path(f.name).lexically_relative("modules");
+        std::vector<std::filesystem::path> parts(relative.begin(), relative.end());
         auto target = home / relative;
-        if (std::distance(relative.begin(), relative.end()) == 1) {
-            // modules/lua51.dll: the runtime. Not written when a runtime that
-            // passes verification is already where lua_runtime::ensure looks
-            // first (beside the exe, or in the modules directory): that one is
-            // loaded anyway, and may be mapped by every other process using this
-            // directory. One that would be REFUSED is replaced, so a stale or
-            // broken cached runtime cannot keep a payload that carries a good one
+        if (parts.size() == 1) {
+            // modules/lua51.dll: the runtime. Not written when a verified one is
+            // already where lua_runtime::ensure looks first (beside the exe, or
+            // lxe's own ~\.lxe\bin). One that would be REFUSED is replaced, so a
+            // stale or broken copy cannot keep a payload that carries a good one
             // from starting.
-            if (lowercase(relative.filename().string()) == "lua51.dll"
-                && (lua_runtime::verify(exe_dir / "lua51.dll", nullptr) || lua_runtime::verify(target, nullptr))) {
-                continue;
+            if (lowercase(relative.filename().string()) == "lua51.dll") {
+                if (lua_runtime::verify(exe_dir / "lua51.dll", nullptr)
+                    || lua_runtime::verify(modules_dir::bin() / "lua51.dll", nullptr)) {
+                    continue;
+                }
+                // The runtime is lxe's, not the app's: it goes to ~\.lxe\bin,
+                // where every lxe and app looks for it (it is hash-verified
+                // before it is loaded). Only when that is not writable, next to
+                // the app.
+                std::string error;
+                if (lua_runtime::known_good_bytes(f.data)
+                    && modules_dir::write_atomically(modules_dir::bin() / "lua51.dll", f.data, &error)) {
+                    continue;
+                }
+                if (lua_runtime::verify(target, nullptr)) continue;
             }
         } else {
-            // A bundled module wins over an installed one of the same name, and is
-            // never installed or updated by import() - even when it could not be
+            // modules/<name>/<version>/<file> (an older payload has no version:
+            // modules/<name>/<file>, unpacked to <name>\bundled\<file>). A bundled
+            // module wins over an installed one of the same name, and is never
+            // installed or updated by import() - even when it could not be
             // written below (an older copy is better than a stranger's module of
             // the same name).
-            LefFile::bundled_modules.insert(lowercase(relative.begin()->string()));
+            auto name = lowercase(parts[0].string());
+            std::filesystem::path folder;
+            if (parts.size() >= 3) {
+                folder = home / parts[0] / parts[1];
+            } else {
+                folder = home / parts[0] / "bundled";
+                target = folder / parts[1];
+            }
+            // An unpack that fails leaves an EMPTY entry: import() then reports
+            // it, instead of loading whatever is on disk in that folder.
+            std::string error;
+            if (!modules_dir::write_atomically(target, f.data, &error)) {
+                std::cerr << "Warning: could not unpack the bundled " << f.name << ": " << error << std::endl;
+                LefFile::bundled_modules[name] = std::filesystem::path();
+            } else if (!LefFile::bundled_modules.contains(name)) {
+                LefFile::bundled_modules[name] = folder;
+            }
+            continue;
         }
         std::string error;
         if (!modules_dir::write_atomically(target, f.data, &error)) {
@@ -329,13 +389,41 @@ bool LefFile::store_as_lef(const std::string &outfile, const std::string& source
             if (verbose) std::cout << "[+dll] modules/lua51.dll (" << buffer.size() << " bytes, from " << lua51_path.string() << ")" << std::endl;
         }
 
-        for (const auto& mod : bundle_modules) {
+        for (const auto& requested : bundle_modules) {
+            // -b name or -b name@version. The files come from the project's
+            // ./modules/<name>/ (any version given is the one recorded), or else
+            // from lxe's store (~\.lxe\modules\<name>\<best match>\).
+            std::string mod = requested, version;
+            if (auto at = requested.find('@'); at != std::string::npos) {
+                mod = requested.substr(0, at);
+                version = requested.substr(at + 1);
+            }
+            // An explicit version is the store's: checkout bytes are never
+            // labelled with a published version (only an unversioned -b name
+            // takes ./modules/<name>/).
             auto mod_dir = modules_path / mod;
+            if (!version.empty() || !std::filesystem::is_directory(mod_dir, ec)) {
+                auto stored = modules_dir::best_installed(lowercase(mod), version.empty() ? "*" : version);
+                mod_dir = stored;
+                if (!stored.empty()) version = stored.filename().string();
+                else if (!version.empty()) {
+                    std::cerr << "Error: -b " << requested << ": no installed version matches (lxe install "
+                              << requested << " first), " << outfile << " was not written." << std::endl;
+                    return false;
+                }
+            }
             if (!std::filesystem::is_directory(mod_dir, ec)) {
                 // Not a warning: a program that bundles a module never installs
                 // it, so a missing one would be fetched from the registry at run
                 // time - possibly a different module that has the same name.
-                std::cerr << "Error: module directory " << mod_dir << " not found (-b " << mod << "), "
+                std::cerr << "Error: module directory " << mod_dir << " not found (-b " << requested
+                          << ", nor in " << (modules_dir::store() / mod).string() << "), "
+                          << outfile << " was not written." << std::endl;
+                return false;
+            }
+            if (version.empty()) version = bundle_version(modules_path, mod, mod_dir);
+            if (!modules_dir::is_version(version) && !version.starts_with("local-")) {
+                std::cerr << "Error: -b " << requested << ": \"" << version << "\" is not a version, "
                           << outfile << " was not written." << std::endl;
                 return false;
             }
@@ -346,8 +434,12 @@ bool LefFile::store_as_lef(const std::string &outfile, const std::string& source
             }
             for (auto& entry : walk) {
                 if (!entry.is_regular_file()) continue;
-                if (entry.path().extension() != ".dll") continue;
-                auto rel_path = "modules/" + std::filesystem::relative(entry.path(), modules_path).string();
+                // The module's whole folder: its DLLs and its own Lua files
+                // (require("name.sub") loads them from the unpacked folder).
+                auto ext = lowercase(entry.path().extension().string());
+                if (ext != ".dll" && ext != ".lua") continue;
+                auto rel_path = "modules/" + lowercase(mod) + "/" + version + "/"
+                    + std::filesystem::relative(entry.path(), mod_dir).string();
                 for (auto& c : rel_path) if (c == '\\') c = '/';
                 std::ifstream input(entry.path(), std::ios::binary);
                 std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});

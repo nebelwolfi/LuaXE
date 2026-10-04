@@ -1,22 +1,34 @@
 //
-// The modules directory: <directory of the running executable>\modules.
+// Where lxe keeps its runtime and modules.
 //
-// ONE place for every native module a process installs, unpacks and loads. A
-// standalone lxe uses <lxe dir>\modules; an app installed as its own executable
-// (girl.exe in %USERPROFILE%\.girl\bin) gets its own <app dir>\modules. It is
-// never the working directory: for a compiled program the cwd is the user's
-// workspace, and a DLL found there is a DLL somebody could have planted.
+//   %LXE_HOME%  (default %USERPROFILE%\.lxe)
+//     bin\                    lxe.exe and lua51.dll of the installed lxe; the
+//                             runtime is cached here when it is downloaded
+//     modules\<name>\<version>\
+//                             the shared module store: what import() and
+//                             `lxe install` fetch from luaxe.dev, one folder per
+//                             version, for every lxe and every app
 //
-// A source run (`lxe run main.lua` inside a project) still looks at the
-// project's own <cwd>\modules first - that is the project's dependency folder,
-// managed by `lxe install` - but installs what it does not have into the
-// modules directory, never into whatever directory it was started from.
+//   <app dir>\modules\<name>\<version>\
+//                             what an app CARRIES (`lxe compile -b`): unpacked
+//                             next to the app - the .lef, or the compiled exe -
+//                             so no other project can load it by accident, and
+//                             it always wins over the store for that app
+//
+// Never the working directory for a compiled program: its cwd is the user's
+// workspace, and a DLL found there is a DLL somebody could have planted. A
+// source run (`lxe run main.lua`) additionally honours flat
+// <root>\modules\<name>\ folders (the layout before the store existed), in
+// order: the cwd (the project), the running script's own folder (a checkout
+// started from elsewhere), and the lxe executable's folder (a developer lxe
+// with staged modules).
 //
 #ifndef LUAXE_MODULES_DIR_H
 #define LUAXE_MODULES_DIR_H
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace modules_dir {
 
@@ -24,8 +36,40 @@ namespace modules_dir {
 /// longer than MAX_PATH; falls back to the cwd only if Windows cannot answer).
 std::filesystem::path exe_dir();
 
-/// <exe dir>\modules - the modules directory.
-std::filesystem::path home();
+/// %LXE_HOME%, or %USERPROFILE%\.lxe.
+std::filesystem::path lxe_home();
+/// <lxe home>\bin - the installed lxe and its runtime.
+std::filesystem::path bin();
+/// <lxe home>\modules - the shared, versioned module store.
+std::filesystem::path store();
+
+/// The running app's own folder (the .lef's, or the compiled exe's), set before
+/// any Lua runs; empty for a plain `lxe run x.lua`.
+std::filesystem::path app_dir();
+void set_app_dir(const std::filesystem::path& dir);
+
+/// The folder of the .lua script a source run executes; empty otherwise.
+void set_script_dir(const std::filesystem::path& dir);
+/// The flat <root>\modules folders a source run looks in (see above), existing
+/// ones only, without duplicates.
+std::vector<std::filesystem::path> source_roots();
+
+// ---- versions (semver: MAJOR.MINOR.PATCH[-pre][+build]) ----------------------
+
+/// True when `text` is a plain version ("1.0.0", "v1.2.3" is not).
+bool is_version(const std::string& text);
+/// <0, 0, >0 like strcmp; both must be versions.
+int compare_versions(const std::string& left, const std::string& right);
+/// Does `version` satisfy `range`? Ranges: "" or "*" (any), "1.2.3" (exact),
+/// ">=1.0.0", ">1", "<=", "<", "=", "^1.2.3", "~1.2.3", space-separated
+/// comparators (all must hold) and "||" alternatives. Partial versions ("1",
+/// "1.2") fill the missing parts with 0; a bare partial version matches its
+/// prefix ("1.2" = ">=1.2.0 <1.3.0").
+bool satisfies(const std::string& version, const std::string& range);
+/// The versions installed under <store>\<name>, highest first.
+std::vector<std::string> installed_versions(const std::string& name);
+/// <store>\<name>\<highest installed version satisfying range>, or empty.
+std::filesystem::path best_installed(const std::string& name, const std::string& range);
 
 /// True when `path` holds exactly `data`.
 bool same_contents(const std::filesystem::path& path, const std::string& data);

@@ -6,6 +6,8 @@
 #define LUAXE_LEF_H
 
 #include <optional>
+#include <filesystem>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -59,12 +61,13 @@ struct LefFile {
     /// Returns false (after printing why) when nothing usable was written.
     static bool store_as_lef(const std::string& outfile, const std::string& source, const std::string& main, const std::vector<std::string>& args, const std::vector<std::string>& bundle_modules, bool strip, bool verbose);
 
-    /// Unpacks the DLLs a payload bundles (-b) into the modules directory
-    /// (<exe dir>\modules, see modules_dir.h) and records their module names in
-    /// bundled_modules, so import() loads exactly those copies and never
-    /// installs or updates them. The bundled lua51.dll is only written when the
-    /// modules directory has no runtime yet (a runtime there is hash-verified
-    /// before it is loaded, and may be mapped by other processes).
+    /// Unpacks the DLLs a payload bundles (-b) NEXT TO THE APP:
+    /// <app dir>\modules\<name>\<version>\ (modules_dir::app_dir(): the .lef's
+    /// folder, or the compiled exe's), so no other project loads them by
+    /// accident, and records name -> folder in bundled_modules: import() loads
+    /// exactly those copies and never installs or updates them. The bundled
+    /// lua51.dll goes to <app dir>\modules\lua51.dll, and only when no verified
+    /// runtime is beside the exe or in ~\.lxe\bin.
     /// Shared by a compiled .exe and `lxe run x.lef`. Call it BEFORE the first
     /// Lua state exists. Does nothing for a payload with no bundled DLLs.
     /// Returns false only when lef_data is not a readable LEF payload (a failed
@@ -72,8 +75,8 @@ struct LefFile {
     static bool extract_bundled_dlls(const std::string& lef_data);
 
     static std::vector<LefFile> loaded;
-    /// Lowercase names of the modules the running payload carries itself.
-    static std::set<std::string> bundled_modules;
+    /// Lowercase name -> folder of every module the running payload carries.
+    static std::map<std::string, std::filesystem::path> bundled_modules;
 };
 
 #endif //LUAXE_LEF_H

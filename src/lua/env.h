@@ -8,6 +8,7 @@
 #include "shared/include/luaxe/env.h"
 #include "shared/include/luaxe/bind.h"
 #include "src/lua/modules_dir.h"
+#include "src/lua/lef.h"
 
 namespace lua::env {
 /// The .lef this process runs (`lxe app.lef` / `lxe run app.lef`), absolute;
@@ -46,10 +47,48 @@ static void open(lua_State*L) {
         detail::inst->is_compiled = lua_toboolean(L, 3);
         return 0;
     });
-    // <exe dir>\modules: where this process installs, unpacks and loads its
-    // native modules (src/lua/modules_dir.h). Read-only.
+    // lxe's versioned module store, %USERPROFILE%\.lxe\modules (src/lua/modules_dir.h).
     env.prop("modules_dir", [](lua_State* L) -> int {
-        lua_pushstring(L, modules_dir::home().string().c_str());
+        lua_pushstring(L, modules_dir::store().string().c_str());
+        return 1;
+    });
+    // %USERPROFILE%\.lxe (or LXE_HOME).
+    env.prop("lxe_home", [](lua_State* L) -> int {
+        lua_pushstring(L, modules_dir::lxe_home().string().c_str());
+        return 1;
+    });
+    // The folder the running app's bundled modules unpack to (<app dir>\modules),
+    // nil when nothing runs as an app.
+    env.prop("app_modules_dir", [](lua_State* L) -> int {
+        if (modules_dir::app_dir().empty()) return 0;
+        lua_pushstring(L, (modules_dir::app_dir() / "modules").string().c_str());
+        return 1;
+    });
+    // env.find_module(name[, range]) -> the folder import(name) would load from
+    // WITHOUT installing anything (bundled, then the project's flat folder in a
+    // source run, then the best installed version in the store), or nil.
+    env.fun("find_module", [](lua_State* L) -> int {
+        std::string name = luaL_checkstring(L, 1);
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        std::string range = lua_isstring(L, 2) ? lua_tostring(L, 2) : "*";
+        if (name.empty() || name.find_first_of("/\\:.") != std::string::npos) return 0;
+        std::error_code ec;
+        if (auto bundled = LefFile::bundled_modules.find(name); bundled != LefFile::bundled_modules.end()) {
+            if (!std::filesystem::is_directory(bundled->second, ec)) return 0;
+            lua_pushstring(L, bundled->second.string().c_str());
+            return 1;
+        }
+        if (!lua::env::is_compiled()) {
+            for (const auto& root : modules_dir::source_roots()) {
+                if (std::filesystem::is_directory(root / name, ec)) {
+                    lua_pushstring(L, (root / name).string().c_str());
+                    return 1;
+                }
+            }
+        }
+        auto dir = modules_dir::best_installed(name, range);
+        if (dir.empty()) return 0;
+        lua_pushstring(L, dir.string().c_str());
         return 1;
     });
     env.prop("lef_path", [](lua_State* L) -> int {

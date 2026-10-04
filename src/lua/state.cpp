@@ -157,8 +157,9 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
             lua_pop(L, 2);
         }
         {
-            // package.path += the modules roots import() uses (import.h): the
-            // project's <cwd>\modules for a source run, then <exe>\modules.
+            // package.path += the project's flat <cwd>\modules for a source run
+            // (import.h). The store is versioned: import() resolves a module's
+            // folder, and require("name.sub") finds its files from there.
             lua_getglobal(L, "package");
             lua_newtable(L);
             lua_setfield(L, -2, "modules");
@@ -170,7 +171,6 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
                 auto cwd = std::filesystem::current_path(ec);
                 if (!ec) path += ";" + cwd.string() + "\\modules\\?.lua";
             }
-            path += ";" + modules_dir::home().string() + "\\?.lua";
             lua_pushstring(L, path.c_str());
             lua_setfield(L, -2, "path");
             lua_pop(L, 1);

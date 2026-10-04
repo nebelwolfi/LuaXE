@@ -59,6 +59,9 @@ bool verify(const std::filesystem::path& file, std::string* reason);
 /// unlike verify(), LUAXE_ALLOW_UNVERIFIED_LUA51 does not change this answer.
 /// What a compiled program EMBEDS has to pass this: it will run elsewhere.
 bool known_good(const std::filesystem::path& file);
+/// The same check for bytes in memory (a runtime a payload carries), so only a
+/// known-good image is ever written where every lxe looks for its runtime.
+bool known_good_bytes(const std::string& data);
 
 /// SHA-256 of a file, lowercase hex, or "" when it cannot be read.
 std::string sha256(const std::filesystem::path& file);

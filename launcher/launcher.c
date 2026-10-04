@@ -6,14 +6,15 @@
 //     "<dir>\lxe.exe" "<dir>\<name>.lef" <its own arguments, verbatim>
 //
 // so an app shipped as a .lef still has a command of its own (girl.exe ->
-// girl.lef) without carrying a copy of lxe. The modules directory is lxe's
-// <dir>\modules - the same folder the launcher sits in.
+// girl.lef) without carrying a copy of lxe. What the app bundles unpacks next
+// to the .lef (<dir>\modules\<name>\<version>\), what it installs goes to lxe's
+// store (%USERPROFILE%\.lxe\modules\<name>\<version>\).
 //
-// The layout: <name>.lef sits in the launcher's own folder, and so does
-// lxe.exe (luaxe.dev's install.ps1 and LuaHarness' build_lef.lua lay it out);
-// when it does not, the first lxe.exe on PATH runs the app instead. <name> is
-// the launcher's file name without a trailing ".exe". The app's modules
-// directory is always the folder of the lxe.exe that runs it.
+// The layout: <name>.lef sits in the launcher's own folder. lxe.exe is looked
+// for, in order: beside the launcher, in lxe's own install
+// (%LXE_HOME%\bin, default %USERPROFILE%\.lxe\bin - where luaxe.dev's
+// install.ps1 puts it), then the first lxe.exe on PATH. <name> is the
+// launcher's file name without a trailing ".exe".
 //
 // What it guarantees:
 //   - the arguments reach the app byte for byte: the tail of its own command
@@ -181,6 +182,31 @@ static wchar_t* lxe_on_path(HANDLE heap) {
     return NULL;
 }
 
+// <LXE_HOME or USERPROFILE\.lxe>\bin\lxe.exe when it exists, else NULL.
+static wchar_t* lxe_in_home(HANDLE heap) {
+    const wchar_t* names[2] = { L"LXE_HOME", L"USERPROFILE" };
+    for (int i = 0; i < 2; i++) {
+        DWORD size = GetEnvironmentVariableW(names[i], NULL, 0);
+        if (size == 0) continue;
+        wchar_t* path = (wchar_t*)HeapAlloc(heap, 0, (size + 32) * sizeof(wchar_t));
+        if (!path) return NULL;
+        DWORD length = GetEnvironmentVariableW(names[i], path, size);
+        if (length == 0 || length >= size) continue;
+        // absolute only: a relative value would resolve against the cwd
+        int absolute = (length >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'))
+            || (length >= 2 && path[0] == L'\\' && path[1] == L'\\');
+        if (!absolute) continue;
+        while (length > 0 && (path[length - 1] == L'\\' || path[length - 1] == L'/')) length--;
+        wchar_t* cursor = path + length;
+        if (i == 1) cursor = append(cursor, L"\\.lxe", 5);
+        cursor = append(cursor, L"\\bin\\lxe.exe", 12);
+        *cursor = 0;
+        if (is_file(path)) return path;
+        // LXE_HOME set but without lxe: still try the profile default
+    }
+    return NULL;
+}
+
 void __stdcall entry(void) {
     HANDLE heap = GetProcessHeap();
     DWORD capacity = 32768;
@@ -211,8 +237,9 @@ void __stdcall entry(void) {
 
     if (!is_file(lef)) fail(L"no application at", lef, 0);
     if (!is_file(runtime)) {
-        wchar_t* found = lxe_on_path(heap);
-        if (!found) fail(L"no LuaXE runtime: lxe.exe is neither on PATH nor at", runtime, 0);
+        wchar_t* found = lxe_in_home(heap);
+        if (!found) found = lxe_on_path(heap);
+        if (!found) fail(L"no LuaXE runtime: lxe.exe is not in %USERPROFILE%\\.lxe\\bin, on PATH or at", runtime, 0);
         runtime = found;
     }
 
