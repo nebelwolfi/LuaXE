@@ -44,7 +44,9 @@ static bool should_relaunch() {
     return detail::inst->should_relaunch;
 }
 static bool is_compiled() {
-    return detail::inst->is_compiled;
+    // `inst` is per translation unit and only set where a state exists; code
+    // reached from the CLI (no state) must read "not compiled", not crash.
+    return detail::inst && detail::inst->is_compiled;
 }
 static const char* exe() {
     return detail::inst->exe;

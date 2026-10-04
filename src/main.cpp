@@ -53,37 +53,15 @@ int main(int argc, char** argv) {
             input.close();
 
             // Pre-parse the LEF to extract bundled DLLs before Lua runs
-            {
-                auto lef_data = std::string(buffer.begin(), buffer.end());
-                auto preview = LefFile::load_from_memory(lef_data);
-                if (preview) {
-                    bool has_dlls = false;
-                    for (const auto& f : preview->files) {
-                        if (f.type == LefFile::DLL_BINARY) { has_dlls = true; break; }
-                    }
-                    if (has_dlls) {
-                        auto temp_base = std::filesystem::temp_directory_path() / ("lxe-" + std::to_string(std::hash<std::string>{}(lef_data)));
-                        std::filesystem::create_directories(temp_base / "modules");
-                        for (const auto& f : preview->files) {
-                            if (f.type != LefFile::DLL_BINARY) continue;
-                            auto dll_path = temp_base / f.name;
-                            std::filesystem::create_directories(dll_path.parent_path());
-                            if (!std::filesystem::exists(dll_path) || std::filesystem::file_size(dll_path) != f.data.size()) {
-                                std::ofstream out(dll_path, std::ios::binary);
-                                out.write(f.data.data(), f.data.size());
-                            }
-                        }
-                        LefFile::bundled_dll_dir = temp_base;
-                        AddDllDirectory((temp_base / "modules").wstring().c_str());
-                    }
-                    LefFile::loaded.clear();
-                }
+            if (!LefFile::extract_bundled_dlls(std::string(buffer.begin(), buffer.end()))) {
+                std::cerr << "Error: this executable's payload is not a valid .lef (the file is damaged)" << std::endl;
+                return 1;
             }
 
-            // TB-195: the payload's own lua51.dll is one of the runtime's
-            // candidates, so bind it before the state that runs this payload is
-            // created.
-            require_lua_runtime(LefFile::bundled_dll_dir);
+            // TB-195: the payload's own lua51.dll (unpacked into <exe>\modules
+            // above when that had none) is one of the runtime's candidates, so
+            // bind it before the state that runs this payload is created.
+            require_lua_runtime({});
 
             load_lua_state_and_run([&](lua_State* L) {
                 load_lef_memory(L, std::string(buffer.begin(), buffer.end()));
@@ -141,10 +119,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // todo check if first arg is a .lef or .lua file, requires fixup of argv to insert "run" at index 1
-
     // disable buffering
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    // `lxe file.lef [args]` / `lxe file.lua [args]` is `lxe run file [args]`: what
+    // the .lef file association, a file dropped on the exe and a bare
+    // `lxe app.lef` send. parse_and_run(_, 0) reads the file from argv[1].
+    if (is_script_path(argv[1])) {
+        parse_and_run(std::cout, 0);
+        return 0;
+    }
 
     // check for options
     for (int i = 1; i < argc; i++) {

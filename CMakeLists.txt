@@ -44,6 +44,8 @@ add_executable(lxe src/main.cpp
         src/lua/import.h
         src/lua/lua_runtime.h
         src/lua/lua_runtime.cpp
+        src/lua/modules_dir.h
+        src/lua/modules_dir.cpp
         src/lua/globals.h
         src/lua/env.h
         src/is_path_in_PATH.cpp
@@ -75,6 +77,18 @@ endif()
 
 # Precompiled headers
 target_precompile_headers(lxe PRIVATE src/pch.h)
+
+# lxe-launcher: the few-KB stand-in an app shipped as a .lef is installed under
+# (girl.exe -> "lxe.exe girl.lef <args>"), see launcher/launcher.c. No C runtime:
+# kernel32 only, its own entry point, no stack probes or security cookies.
+add_executable(lxe-launcher launcher/launcher.c launcher/launcher.rc)
+target_compile_options(lxe-launcher PRIVATE /GS- /O1 /Oi-)
+target_link_options(lxe-launcher PRIVATE /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /INCREMENTAL:NO /MANIFEST:NO /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
+# The run-time checks a Debug build adds (/RTC1) call into the CRT, which the
+# launcher does not link; it is the only C target, so C's Debug flags lose them.
+string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+target_link_libraries(lxe-launcher PRIVATE kernel32.lib)
+set_target_properties(lxe-launcher PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin/" MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 # Versioning
 add_custom_target(depender) # dummy target

@@ -19,7 +19,7 @@ static bool register_as_dot_lef_handler() {
         return false;
     }
     // set default value to "luaxe"
-    if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)L"luaxe", 10) != ERROR_SUCCESS) {
+    if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE*)L"luaxe", (DWORD)sizeof(L"luaxe")) != ERROR_SUCCESS) {
         printf("Failed to set registry key value\n");
 
         return false;
@@ -32,8 +32,10 @@ static bool register_as_dot_lef_handler() {
 
         return false;
     }
-    // set default value to "luaxe.exe %1"
-    if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)(std::wstring(L"\"") + exe_path.wstring() + L"\" \"%1\"").c_str(), (std::wstring(L"\"") + exe_path.wstring() + L"\" \"%1\"").size() * sizeof(wchar_t)) != ERROR_SUCCESS) {
+    // set default value to "<exe>" run "%1" %* - explicit `run`, and the
+    // arguments passed along. The size includes the terminating null (REG_SZ).
+    auto command = std::wstring(L"\"") + exe_path.wstring() + L"\" run \"%1\" %*";
+    if (RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE*)command.c_str(), (DWORD)((command.size() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) {
         printf("Failed to set registry key value\n");
 
         return false;

@@ -6,7 +6,21 @@
 #define LUAXE_RUN_H
 
 #include "src/lua/state.h"
+#include "src/lua/lef.h"
+#include "src/lua/env.h"
 #include <luaxe/bind.h>
+
+/// Case-insensitive extension test ("x.LEF" is a .lef).
+static bool has_extension(const std::string& path, const char* extension) {
+    auto ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return ext == extension;
+}
+
+/// A file `lxe run` can execute: a .lua or a .lef.
+static bool is_script_path(const std::string& path) {
+    return has_extension(path, ".lua") || has_extension(path, ".lef");
+}
 
 static void parse_and_run(std::ostream& out, int i) {
     std::string source;
@@ -19,14 +33,40 @@ static void parse_and_run(std::ostream& out, int i) {
             out << "No source provided, try \"luaxe help compile\"." << std::endl;
             return;
         }
+        i++; // past "run": the program's arguments start after it
     } else {
         source = __argv[++i];
-        if (!source.ends_with(".lua") && !source.ends_with(".lef")) {
+        if (!is_script_path(source)) {
             out << "Invalid source provided, try \"luaxe help run\"." << std::endl;
             return;
         }
         i++;
     }
+    // A .lef runs exactly like the payload of a compiled .exe (main.cpp): its
+    // bundled DLLs (-b, lua51.dll included) are unpacked before the runtime is
+    // bound and the state exists, and it runs as compiled, so import() and the
+    // app resolve the bundled modules instead of looking for them on disk.
+    bool is_lef = has_extension(source, ".lef");
+    if (is_lef) {
+        std::ifstream input(source, std::ios::binary);
+        if (!input.is_open()) {
+            std::cerr << "Error: Could not open file " << source << std::endl;
+            std::exit(1);
+        }
+        // Through the file system (weakly_canonical), so the spelling - case
+        // included - is the file's own whichever way it was typed; always absolute.
+        std::error_code ec;
+        auto canonical = std::filesystem::weakly_canonical(std::filesystem::absolute(source, ec), ec);
+        if (ec) canonical = std::filesystem::absolute(source, ec).lexically_normal();
+        lua::env::lef_path = canonical.string();
+        if (!LefFile::extract_bundled_dlls(std::string(std::istreambuf_iterator<char>(input), {}))) {
+            std::cerr << "Error: " << source << " is not a valid .lef file" << std::endl;
+            std::exit(1);
+        }
+    }
+    // A script that does not load, or raises, fails the process (exit 1): `lxe
+    // <file>` is what the .lef association and scripts call.
+    bool failed = false;
     load_lua_state_and_run([&](lua_State* L) {
         lua_createtable(L, __argc - i, 0);
         for (int j = i; j < __argc; j++) {
@@ -34,16 +74,19 @@ static void parse_and_run(std::ostream& out, int i) {
             lua_rawseti(L, -2, j - i + 1);
         }
         lua_setglobal(L, "arg");
-        if (source.ends_with(".lua")) {
+        if (!is_lef) {
             load_lua_file(L, source);
         } else {
-            load_lef_file(L, source);
+            load_lef_file(L, source, i);
         }
         if (lua::pcall(L, 0, 0) != LUA_OK) {
-            std::cerr << "Error: " << lua_tostring(L, -1) << std::endl;
+            const char* message = lua_tostring(L, -1);
+            std::cerr << "Error: " << (message ? message : "(error object is not a string)") << std::endl;
             lua_pop(L, 1);
+            failed = true;
         }
-    }, false);
+    }, is_lef);
+    if (failed) std::exit(1);
 }
 
 #endif //LUAXE_RUN_H

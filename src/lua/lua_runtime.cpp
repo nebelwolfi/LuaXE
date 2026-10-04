@@ -509,6 +509,15 @@ bool verify(const std::filesystem::path& file, std::string* reason) {
     return true;
 }
 
+bool known_good(const std::filesystem::path& file) {
+    auto hash = sha256(file);
+    if (hash.empty()) return false;
+    for (auto candidate : kKnownGood) {
+        if (hash == candidate) return true;
+    }
+    return false;
+}
+
 bool ensure(const std::filesystem::path& bundled_dir, std::string* error) {
     if (loaded()) return true;
 
@@ -526,9 +535,9 @@ bool ensure(const std::filesystem::path& bundled_dir, std::string* error) {
         beside / "modules" / lua_runtime::kDllName,
     };
     if (!bundled_dir.empty()) {
-        // A compiled executable extracts its payload to <temp>/lxe-<hash>/ and the
-        // runtime is stored there as modules/lua51.dll (lef.cpp stores it under that
-        // name), so BOTH shapes are tried.
+        // An explicit extra directory (no caller passes one today: a payload's
+        // runtime is unpacked into <exe>\modules, the second candidate above).
+        // Both shapes are tried.
         candidates.push_back(bundled_dir / lua_runtime::kDllName);
         candidates.push_back(bundled_dir / "modules" / lua_runtime::kDllName);
     }

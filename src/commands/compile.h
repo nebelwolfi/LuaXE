@@ -42,7 +42,13 @@ static void parse_and_compile(std::ostream& out, int i) {
                 j++;
                 // Parse comma-separated module names, or "all" to bundle everything in modules/
                 if (mods == "all") {
-                    for (auto& entry : std::filesystem::directory_iterator("modules")) {
+                    std::error_code ec;
+                    std::filesystem::directory_iterator walk("modules", ec);
+                    if (ec) {
+                        std::cerr << "Error: -b all: there is no readable .\\modules folder (" << ec.message() << ")" << std::endl;
+                        std::exit(1);
+                    }
+                    for (auto& entry : walk) {
                         if (entry.is_directory() && entry.path().filename().string() != "." && entry.path().filename().string() != "..") {
                             bundle_modules.push_back(entry.path().filename().string());
                         }
@@ -87,7 +93,8 @@ static void parse_and_compile(std::ostream& out, int i) {
         if (verbose) out << "Output file: " << output << std::endl;
     }
     if (verbose) out << "Source: " << source << std::endl;
-    LefFile::store_as_lef(output, source, main, args, bundle_modules, strip, verbose);
+    // A failed compile must fail the process: build scripts check the exit code.
+    if (!LefFile::store_as_lef(output, source, main, args, bundle_modules, strip, verbose)) std::exit(1);
 }
 
 #endif //LUAXE_COMPILE_H

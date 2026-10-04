@@ -8,7 +8,9 @@
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled);
 void load_lua_file(lua_State* L, const std::string& source);
 void load_lua_memory(lua_State* L, const std::string& source, const std::string& chunk_name);
-void load_lef_file(lua_State* L, const std::string& path);
+// first_arg: the argv index of the first argument meant for the program (what
+// follows `lxe run x.lef`); arg = the .lef's stored args, then argv[first_arg..].
+void load_lef_file(lua_State* L, const std::string& path, int first_arg);
 void load_lef_memory(lua_State* L, const std::string& data);
 
 #endif //LUAXE_STATE_H

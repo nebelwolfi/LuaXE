@@ -5,6 +5,11 @@
 #ifndef LUAXE_LEF_H
 #define LUAXE_LEF_H
 
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
 struct LefFile {
     static constexpr unsigned short VERSION_V1 = 0xd0d0;
     static constexpr unsigned short VERSION_V2 = 0xd0d1;
@@ -50,10 +55,25 @@ struct LefFile {
 
     static std::optional<LefFile> load_from_file(const std::string& path);
     static std::optional<LefFile> load_from_memory(const std::string& data);
-    static void store_as_lef(const std::string& outfile, const std::string& source, const std::string& main, const std::vector<std::string>& args, const std::vector<std::string>& bundle_modules, bool strip, bool verbose);
+    /// Compiles `source` into `outfile` (.lef, or an .exe when outfile ends in .exe).
+    /// Returns false (after printing why) when nothing usable was written.
+    static bool store_as_lef(const std::string& outfile, const std::string& source, const std::string& main, const std::vector<std::string>& args, const std::vector<std::string>& bundle_modules, bool strip, bool verbose);
+
+    /// Unpacks the DLLs a payload bundles (-b) into the modules directory
+    /// (<exe dir>\modules, see modules_dir.h) and records their module names in
+    /// bundled_modules, so import() loads exactly those copies and never
+    /// installs or updates them. The bundled lua51.dll is only written when the
+    /// modules directory has no runtime yet (a runtime there is hash-verified
+    /// before it is loaded, and may be mapped by other processes).
+    /// Shared by a compiled .exe and `lxe run x.lef`. Call it BEFORE the first
+    /// Lua state exists. Does nothing for a payload with no bundled DLLs.
+    /// Returns false only when lef_data is not a readable LEF payload (a failed
+    /// unpack is reported and the payload runs without that module).
+    static bool extract_bundled_dlls(const std::string& lef_data);
 
     static std::vector<LefFile> loaded;
-    static std::filesystem::path bundled_dll_dir;
+    /// Lowercase names of the modules the running payload carries itself.
+    static std::set<std::string> bundled_modules;
 };
 
 #endif //LUAXE_LEF_H

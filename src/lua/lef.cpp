@@ -4,9 +4,10 @@
 #include "src/pch.h"
 #include "lef.h"
 #include "lua_runtime.h"
+#include "modules_dir.h"
 
 std::vector<LefFile> LefFile::loaded = {};
-std::filesystem::path LefFile::bundled_dll_dir = {};
+std::set<std::string> LefFile::bundled_modules = {};
 
 std::optional<LefFile> LefFile::load_from_file(const std::string &path) {
     std::ifstream file(path, std::ios::binary);
@@ -20,99 +21,161 @@ std::optional<LefFile> LefFile::load_from_file(const std::string &path) {
 }
 
 std::optional<LefFile> LefFile::load_from_memory(const std::string &data) {
-    if (data.size() < sizeof(Header)) {
-        std::cerr << "Error: Invalid LEF file size" << std::endl;
+    auto fail = [](const char* why) -> std::optional<LefFile> {
+        std::cerr << "Error: " << why << std::endl;
         return std::nullopt;
-    }
+    };
+    if (data.size() < sizeof(Header)) return fail("Invalid LEF file size");
 
-    const auto* header = reinterpret_cast<const Header*>(data.data());
-    if (header->version != VERSION_V1 && header->version != VERSION_V2) {
-        std::cerr << "Error: Invalid LEF file version" << std::endl;
-        return std::nullopt;
-    }
+    // Every field is copied out of the buffer and every length is checked
+    // against what is left of it: a truncated or crafted .lef must be refused,
+    // never read past its end.
+    Header header;
+    std::memcpy(&header, data.data(), sizeof(Header));
+    if (header.version != VERSION_V1 && header.version != VERSION_V2) return fail("Invalid LEF file version");
+    bool isV2 = header.version == VERSION_V2;
+    if (header.fileHeader.numFiles == 0) return fail("No files in LEF file");
 
-    bool isV2 = header->version == VERSION_V2;
+    size_t pos = sizeof(Header);
+    auto fits = [&](unsigned long long n) { return pos <= data.size() && n <= data.size() - pos; };
     LefFile lefFile;
 
-    if (header->fileHeader.numFiles == 0) {
-        std::cerr << "Error: No files in LEF file" << std::endl;
-        return std::nullopt;
+    for (auto i = 0; i < header.argHeader.numArgs; i++) {
+        decltype(ArgHeader::Arg::length) length = 0;
+        if (!fits(sizeof(length))) return fail("Truncated LEF argument");
+        std::memcpy(&length, data.data() + pos, sizeof(length));
+        pos += sizeof(ArgHeader::Arg);
+        if (length == 0) return fail("Invalid argument length");
+        if (!fits(length)) return fail("Truncated LEF argument");
+        lefFile.args.emplace_back(data.data() + pos, length);
+        pos += length;
     }
 
-    const char* pos = data.data() + sizeof(Header);
-    for (auto i = 0; i < header->argHeader.numArgs; i++) {
-        const auto* arg = reinterpret_cast<const ArgHeader::Arg*>(pos);
-        if (arg->length == 0) {
-            std::cerr << "Error: Invalid argument length" << std::endl;
-            return std::nullopt;
-        }
-        lefFile.args.emplace_back(arg->data, arg->length);
-        pos += sizeof(ArgHeader::Arg) + arg->length;
-    }
-
-    pos = data.data() + header->fileHeader.firstFile;
-    for (auto i = 0; i < header->fileHeader.numFiles; i++) {
+    if (header.fileHeader.firstFile > data.size()) return fail("Invalid LEF file offset");
+    pos = (size_t)header.fileHeader.firstFile;
+    for (auto i = 0; i < header.fileHeader.numFiles; i++) {
+        unsigned char type = LUA_BYTECODE;
+        decltype(FileHeader::File::len) len = 0;
+        decltype(FileHeader::File::nameLen) nameLen = 0;
         if (isV2) {
-            const auto* file = reinterpret_cast<const FileHeader::FileV2*>(pos);
-            if (file->len == 0 || file->nameLen == 0) {
-                std::cerr << "Error: Invalid file length" << std::endl;
-                return std::nullopt;
-            }
-            lefFile.files.emplace_back(File{
-                .name = std::string(file->data, file->nameLen),
-                .data = std::string(file->data + file->nameLen, file->len),
-                .type = static_cast<FileType>(file->type)
-            });
-            pos += sizeof(FileHeader::FileV2) + file->len + file->nameLen;
+            if (!fits(sizeof(FileHeader::FileV2))) return fail("Truncated LEF file entry");
+            std::memcpy(&type, data.data() + pos + offsetof(FileHeader::FileV2, type), sizeof(type));
+            std::memcpy(&len, data.data() + pos + offsetof(FileHeader::FileV2, len), sizeof(len));
+            std::memcpy(&nameLen, data.data() + pos + offsetof(FileHeader::FileV2, nameLen), sizeof(nameLen));
+            pos += sizeof(FileHeader::FileV2);
         } else {
-            const auto* file = reinterpret_cast<const FileHeader::File*>(pos);
-            if (file->len == 0 || file->nameLen == 0) {
-                std::cerr << "Error: Invalid file length" << std::endl;
-                return std::nullopt;
-            }
-            lefFile.files.emplace_back(File{
-                .name = std::string(file->data, file->nameLen),
-                .data = std::string(file->data + file->nameLen, file->len)
-            });
-            pos += sizeof(FileHeader::File) + file->len + file->nameLen;
+            if (!fits(sizeof(FileHeader::File))) return fail("Truncated LEF file entry");
+            std::memcpy(&len, data.data() + pos + offsetof(FileHeader::File, len), sizeof(len));
+            std::memcpy(&nameLen, data.data() + pos + offsetof(FileHeader::File, nameLen), sizeof(nameLen));
+            pos += sizeof(FileHeader::File);
         }
+        if (len == 0 || nameLen == 0) return fail("Invalid file length");
+        if (type != LUA_BYTECODE && type != DLL_BINARY) return fail("Invalid LEF file type");
+        if (!fits(nameLen)) return fail("Truncated LEF file name");
+        std::string name(data.data() + pos, nameLen);
+        pos += nameLen;
+        if (!fits(len)) return fail("Truncated LEF file data");
+        lefFile.files.emplace_back(File{
+            .name = std::move(name),
+            .data = std::string(data.data() + pos, (size_t)len),
+            .type = static_cast<FileType>(type)
+        });
+        pos += (size_t)len;
     }
-
-    //printf("Loaded %d files\n", lefFile.files.size());
-    //printf("first file: %s\n", lefFile.files[0].data.c_str());
 
     LefFile::loaded.push_back(lefFile);
 
     return lefFile;
 }
 
-void LefFile::store_as_lef(const std::string &outfile, const std::string& source, const std::string& main, const std::vector<std::string> &args, const std::vector<std::string> &bundle_modules, bool strip, bool verbose) {
-    std::ofstream file(outfile, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << outfile << std::endl;
-        return;
+namespace {
+
+/// A bundled DLL's archive name must stay inside the modules directory:
+/// "modules/...", relative, no drive or root, no `..` component. A crafted name
+/// could otherwise write anywhere before a line of the payload runs.
+bool safe_bundled_name(const std::string& name) {
+    std::filesystem::path p(name);
+    if (!name.starts_with("modules/") || p.has_root_name() || p.has_root_directory()) return false;
+    // Per component too: a root name is only recognised in the FIRST one, so
+    // "modules/C:x.dll" would otherwise pass and append as a drive-relative path.
+    for (const auto& part : p) {
+        if (part == ".." || part == "." || part.has_root_name() || part.string().find(':') != std::string::npos) return false;
     }
-    bool is_exe = outfile.find(".exe") != std::string::npos;
-    // TB-195: `lxe compile` creates a state of its own to dump the sources, so
-    // the runtime has to be bound here too - but only when the file being built
-    // IS this executable (a .lef archive needs no runtime).
-    if (is_exe) {
+    return name.size() > std::string("modules/").size();
+}
+
+std::string lowercase(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return text;
+}
+
+} // namespace
+
+bool LefFile::extract_bundled_dlls(const std::string& lef_data) {
+    auto preview = LefFile::load_from_memory(lef_data);
+    // load_from_memory registers what it parsed; this was only a preview.
+    LefFile::loaded.clear();
+    if (!preview) return false;
+
+    // Every failure below is reported, never thrown out of main; the payload
+    // still runs.
+    const auto exe_dir = modules_dir::exe_dir();
+    const auto home = exe_dir / "modules";
+    for (const auto& f : preview->files) {
+        if (f.type != LefFile::DLL_BINARY) continue;
+        if (!safe_bundled_name(f.name)) {
+            std::cerr << "Warning: refusing the bundled file \"" << f.name << "\": it would unpack outside "
+                      << home.string() << std::endl;
+            continue;
+        }
+        auto relative = std::filesystem::path(f.name).lexically_relative("modules");
+        auto target = home / relative;
+        if (std::distance(relative.begin(), relative.end()) == 1) {
+            // modules/lua51.dll: the runtime. Not written when a runtime that
+            // passes verification is already where lua_runtime::ensure looks
+            // first (beside the exe, or in the modules directory): that one is
+            // loaded anyway, and may be mapped by every other process using this
+            // directory. One that would be REFUSED is replaced, so a stale or
+            // broken cached runtime cannot keep a payload that carries a good one
+            // from starting.
+            if (lowercase(relative.filename().string()) == "lua51.dll"
+                && (lua_runtime::verify(exe_dir / "lua51.dll", nullptr) || lua_runtime::verify(target, nullptr))) {
+                continue;
+            }
+        } else {
+            // A bundled module wins over an installed one of the same name, and is
+            // never installed or updated by import() - even when it could not be
+            // written below (an older copy is better than a stranger's module of
+            // the same name).
+            LefFile::bundled_modules.insert(lowercase(relative.begin()->string()));
+        }
+        std::string error;
+        if (!modules_dir::write_atomically(target, f.data, &error)) {
+            std::cerr << "Warning: could not unpack the bundled " << f.name << ": " << error << std::endl;
+        }
+    }
+    return true;
+}
+
+bool LefFile::store_as_lef(const std::string &outfile, const std::string& source, const std::string& main, const std::vector<std::string> &args, const std::vector<std::string> &bundle_modules, bool strip, bool verbose) {
+    // TB-195: `lxe compile` creates states of its own to compile every .lua
+    // source to bytecode (luaL_newstate + lua_dump below), so the runtime has to
+    // be bound for EVERY output - a .lef archive as much as an .exe. The output
+    // is only opened once every source compiled, so a missing runtime or a broken
+    // source leaves no truncated file behind.
+    {
         std::string runtime_error;
         if (!lua_runtime::ensure({}, &runtime_error)) {
             std::cerr << "Error: no usable Lua runtime, cannot compile." << std::endl
                       << "  " << runtime_error << std::endl;
-            return;
+            return false;
         }
     }
-    if (is_exe) {
-        wchar_t exe_path[MAX_PATH];
-        GetModuleFileNameW(NULL, exe_path, MAX_PATH);
-        std::ifstream input(exe_path, std::ios::binary);
-        std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
-        input.close();
-        file.write(buffer.data(), buffer.size());
-    }
+    auto out_ext = std::filesystem::path(outfile).extension().string();
+    std::transform(out_ext.begin(), out_ext.end(), out_ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    bool is_exe = out_ext == ".exe";
     std::vector<File> files;
+    int failed = 0;
     {
         auto path_fmt = +[](std::string path, bool lua) {
             while (path[0] == '.' || path[0] == '\\') path = path.substr(1);
@@ -135,17 +198,26 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
             if (verbose) std::cout << n << std::endl;
             std::ifstream input(p, std::ios::binary);
             if (!input.is_open()) {
-                std::cout << "Failed to open file: " << p << std::endl;
+                std::cerr << "Error: failed to open file: " << p << std::endl;
+                failed++;
                 return;
             }
             std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
             input.close();
 
             auto L = luaL_newstate();
+            if (!L) {
+                std::cerr << "Error: could not create a Lua state to compile " << p << std::endl;
+                failed++;
+                return;
+            }
 
             if (luaL_loadbuffer(L, buffer.data(), buffer.size(), ("=" + n).c_str()))
             {
-                std::cout << "Failed to load lua file: " << p << "\t" << lua_tostring(L, -1) << std::endl;
+                const char* message = lua_tostring(L, -1);
+                std::cerr << "Error: failed to load lua file: " << p << "\t" << (message ? message : "(no message)") << std::endl;
+                lua_close(L);
+                failed++;
                 return;
             }
 
@@ -156,7 +228,10 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
                 return 0;
             }, &buf))
             {
-                std::cout << "Failed to dump lua file: " << p << "\t" << lua_tostring(L, -1) << std::endl;
+                // lua_dump pushes no error message; the writer above never fails.
+                std::cerr << "Error: failed to dump lua file: " << p << std::endl;
+                lua_close(L);
+                failed++;
                 return;
             }
             luaL_pushresult(&buf);
@@ -191,6 +266,14 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         } else {
             add(path, path.string());
         }
+        if (failed) {
+            std::cerr << "Error: " << failed << " source file(s) failed to compile, " << outfile << " was not written." << std::endl;
+            return false;
+        }
+        if (files.empty()) {
+            std::cerr << "Error: no .lua sources found in " << source << ", " << outfile << " was not written." << std::endl;
+            return false;
+        }
         if (auto mainFile = std::find_if(files.begin(), files.end(), [&](const File& f) { return f.name == path_fmt(main, true); }); mainFile != files.end()) {
             std::rotate(files.begin(), mainFile, mainFile + 1);
         } else if (verbose)  {
@@ -203,35 +286,65 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
     // modules/lua51.dll would have nothing to run on and could not even reach a
     // download on a locked-down machine. .lef output keeps the old rule (bundle
     // only what -b asked for).
-    bool hasDlls = !bundle_modules.empty()
-        || (is_exe && std::filesystem::exists(std::filesystem::path("modules") / "lua51.dll"));
+    bool hasDlls = !bundle_modules.empty() || is_exe;
     if (hasDlls) {
         auto modules_path = std::filesystem::path("modules");
         // Always bundle lua51.dll when bundling any DLL module: the exe loads it
         // at run time (TB-195) and every module resolves `lua51.dll` to it.
-        auto lua51_path = modules_path / "lua51.dll";
-        if (std::filesystem::exists(lua51_path)) {
+        // Only a KNOWN-GOOD runtime is embedded (lua_runtime::known_good: one
+        // of the pinned SHA-256s; LUAXE_ALLOW_UNVERIFIED_LUA51 lets this lxe RUN
+        // on another build, never ship one - the artifact runs elsewhere, where
+        // it would be refused): ./modules/lua51.dll when it is one, otherwise
+        // the runtime this lxe is running on when THAT is one.
+        std::filesystem::path lua51_path = modules_path / "lua51.dll";
+        std::error_code ec;
+        if (!std::filesystem::exists(lua51_path, ec)) {
+            lua51_path = lua_runtime::path();
+            if (verbose) std::cout << "[i] no " << (modules_path / "lua51.dll").string() << ", embedding " << lua51_path.string() << std::endl;
+        } else if (!lua_runtime::known_good(lua51_path)) {
+            std::cerr << "Warning: not embedding " << lua51_path.string() << ": sha256 " << lua_runtime::sha256(lua51_path)
+                      << " is not a known-good LuaXE runtime; embedding the runtime this lxe runs on ("
+                      << lua_runtime::path() << ") instead" << std::endl;
+            lua51_path = lua_runtime::path();
+        }
+        if (!lua_runtime::known_good(lua51_path)) {
+            std::cerr << "Error: the Lua runtime to embed (" << lua51_path.string() << ", sha256 "
+                      << lua_runtime::sha256(lua51_path) << ") is not a known-good LuaXE runtime, " << outfile
+                      << " was not written. Put a known-good lua51.dll in .\\modules (see kKnownGood in src/lua/lua_runtime.cpp)." << std::endl;
+            return false;
+        }
+        {
             std::ifstream input(lua51_path, std::ios::binary);
             std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
             input.close();
+            if (buffer.empty()) {
+                std::cerr << "Error: could not read the Lua runtime " << lua51_path.string() << ", " << outfile << " was not written." << std::endl;
+                return false;
+            }
             files.push_back(File{
                 .name = "modules/lua51.dll",
                 .data = std::string(buffer.begin(), buffer.end()),
                 .type = DLL_BINARY
             });
-            if (verbose) std::cout << "[+dll] modules/lua51.dll (" << buffer.size() << " bytes)" << std::endl;
-        } else {
-            std::cerr << "Warning: lua51.dll not found at " << lua51_path << ", the built executable will "
-                << "have to find or download its Lua runtime at start-up" << std::endl;
+            if (verbose) std::cout << "[+dll] modules/lua51.dll (" << buffer.size() << " bytes, from " << lua51_path.string() << ")" << std::endl;
         }
 
         for (const auto& mod : bundle_modules) {
             auto mod_dir = modules_path / mod;
-            if (!std::filesystem::exists(mod_dir)) {
-                std::cerr << "Warning: module directory " << mod_dir << " not found, skipping" << std::endl;
-                continue;
+            if (!std::filesystem::is_directory(mod_dir, ec)) {
+                // Not a warning: a program that bundles a module never installs
+                // it, so a missing one would be fetched from the registry at run
+                // time - possibly a different module that has the same name.
+                std::cerr << "Error: module directory " << mod_dir << " not found (-b " << mod << "), "
+                          << outfile << " was not written." << std::endl;
+                return false;
             }
-            for (auto& entry : std::filesystem::recursive_directory_iterator(mod_dir)) {
+            std::filesystem::recursive_directory_iterator walk(mod_dir, ec);
+            if (ec) {
+                std::cerr << "Error: cannot read " << mod_dir << " (" << ec.message() << "), " << outfile << " was not written." << std::endl;
+                return false;
+            }
+            for (auto& entry : walk) {
                 if (!entry.is_regular_file()) continue;
                 if (entry.path().extension() != ".dll") continue;
                 auto rel_path = "modules/" + std::filesystem::relative(entry.path(), modules_path).string();
@@ -247,6 +360,20 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
                 if (verbose) std::cout << "[+dll] " << rel_path << " (" << buffer.size() << " bytes)" << std::endl;
             }
         }
+    }
+
+    std::ofstream file(outfile, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << outfile << std::endl;
+        return false;
+    }
+    if (is_exe) {
+        wchar_t exe_path[MAX_PATH];
+        GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+        std::ifstream input(exe_path, std::ios::binary);
+        std::vector<char> buffer(std::istreambuf_iterator<char>(input), {});
+        input.close();
+        file.write(buffer.data(), buffer.size());
     }
 
     uint64_t totalArgSize = 0;
@@ -283,4 +410,10 @@ void LefFile::store_as_lef(const std::string &outfile, const std::string& source
         file.write(lf.name.data(), lf.name.size());
         file.write(lf.data.data(), lf.data.size());
     }
+    file.close();
+    if (!file) {
+        std::cerr << "Error: failed to write " << outfile << std::endl;
+        return false;
+    }
+    return true;
 }

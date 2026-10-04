@@ -7,8 +7,14 @@
 
 #include "shared/include/luaxe/env.h"
 #include "shared/include/luaxe/bind.h"
+#include "src/lua/modules_dir.h"
 
 namespace lua::env {
+/// The .lef this process runs (`lxe app.lef` / `lxe run app.lef`), absolute;
+/// empty for a .lua or a compiled .exe. Lets an app relaunch itself the way it
+/// was started: "<lxe.exe> <lef_path> ...".
+inline std::string lef_path;
+
 static void open(lua_State*L) {
     auto env = bind::add<detail::_env>(L, "env");
 
@@ -39,6 +45,17 @@ static void open(lua_State*L) {
     }, [](lua_State* L) -> int {
         detail::inst->is_compiled = lua_toboolean(L, 3);
         return 0;
+    });
+    // <exe dir>\modules: where this process installs, unpacks and loads its
+    // native modules (src/lua/modules_dir.h). Read-only.
+    env.prop("modules_dir", [](lua_State* L) -> int {
+        lua_pushstring(L, modules_dir::home().string().c_str());
+        return 1;
+    });
+    env.prop("lef_path", [](lua_State* L) -> int {
+        if (lef_path.empty()) return 0;
+        lua_pushstring(L, lef_path.c_str());
+        return 1;
     });
     env.fun("exit", [](lua_State* L) -> int {
         ::exit(luaL_optinteger(L, 1, 0));

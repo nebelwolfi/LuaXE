@@ -1,0 +1,3 @@
+// The launcher's only resource: the LuaXE icon, so an app's <name>.exe is not a
+// blank file in Explorer and the taskbar.
+1 ICON "../res/logo.ico"
