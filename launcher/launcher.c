@@ -9,9 +9,11 @@
 // girl.lef) without carrying a copy of lxe. The modules directory is lxe's
 // <dir>\modules - the same folder the launcher sits in.
 //
-// The layout is the contract: lxe.exe and <name>.lef sit in the launcher's own
-// folder (luaxe.dev's install.ps1 and LuaHarness' build_lef.lua lay it out).
-// <name> is the launcher's file name without a trailing ".exe".
+// The layout: <name>.lef sits in the launcher's own folder, and so does
+// lxe.exe (luaxe.dev's install.ps1 and LuaHarness' build_lef.lua lay it out);
+// when it does not, the first lxe.exe on PATH runs the app instead. <name> is
+// the launcher's file name without a trailing ".exe". The app's modules
+// directory is always the folder of the lxe.exe that runs it.
 //
 // What it guarantees:
 //   - the arguments reach the app byte for byte: the tail of its own command
@@ -140,6 +142,45 @@ static HANDLE inheritable(DWORD which) {
     return handle;
 }
 
+static int is_file(const wchar_t* path) {
+    DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// The first lxe.exe on PATH, or NULL. Walked here rather than with
+// SearchPathW, which also tries the CURRENT directory: for an app the cwd is
+// the user's workspace, and an lxe.exe planted there must never be the one
+// that runs. For the same reason a relative PATH entry (resolved against the
+// cwd) is skipped. Quotes around an entry are allowed, as cmd allows them.
+static wchar_t* lxe_on_path(HANDLE heap) {
+    DWORD size = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    if (size == 0) return NULL;
+    wchar_t* list = (wchar_t*)HeapAlloc(heap, 0, (size + 1) * sizeof(wchar_t));
+    wchar_t* candidate = (wchar_t*)HeapAlloc(heap, 0, (size + 16) * sizeof(wchar_t));
+    if (!list || !candidate) return NULL;
+    if (GetEnvironmentVariableW(L"PATH", list, size + 1) == 0) return NULL;
+    const wchar_t* at = list;
+    while (*at) {
+        const wchar_t* start = at;
+        while (*at && *at != L';') at++;
+        const wchar_t* end = at;
+        if (*at == L';') at++;
+        while (start < end && (*start == L' ' || *start == L'\t' || *start == L'"')) start++;
+        while (end > start && (end[-1] == L' ' || end[-1] == L'\t' || end[-1] == L'"')) end--;
+        while (end > start && (end[-1] == L'\\' || end[-1] == L'/')) end--;
+        if (end <= start) continue;
+        // Absolute only: "C:\..." or a UNC "\\server\share\...".
+        int absolute = (end - start >= 3 && start[1] == L':' && (start[2] == L'\\' || start[2] == L'/'))
+            || (end - start >= 2 && start[0] == L'\\' && start[1] == L'\\');
+        if (!absolute) continue;
+        wchar_t* cursor = append(candidate, start, (size_t)(end - start));
+        cursor = append(cursor, L"\\lxe.exe", 8);
+        *cursor = 0;
+        if (is_file(candidate)) return candidate;
+    }
+    return NULL;
+}
+
 void __stdcall entry(void) {
     HANDLE heap = GetProcessHeap();
     DWORD capacity = 32768;
@@ -168,8 +209,12 @@ void __stdcall entry(void) {
     cursor = append(cursor, L".lef", 4);
     *cursor = 0;
 
-    if (GetFileAttributesW(runtime) == INVALID_FILE_ATTRIBUTES) fail(L"no LuaXE runtime at", runtime, 0);
-    if (GetFileAttributesW(lef) == INVALID_FILE_ATTRIBUTES) fail(L"no application at", lef, 0);
+    if (!is_file(lef)) fail(L"no application at", lef, 0);
+    if (!is_file(runtime)) {
+        wchar_t* found = lxe_on_path(heap);
+        if (!found) fail(L"no LuaXE runtime: lxe.exe is neither on PATH nor at", runtime, 0);
+        runtime = found;
+    }
 
     // "<runtime>" "<lef>" <tail>
     const wchar_t* tail = arguments_tail(GetCommandLineW());
