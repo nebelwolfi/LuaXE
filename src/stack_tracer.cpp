@@ -64,20 +64,37 @@ StackTracer::~StackTracer(void)
 
 std::string StackTracer::GetExceptionStackTrace(LPEXCEPTION_POINTERS e)
 {
+    // Through the gate: HandleException asserts the owner, and a direct call
+    // has none - so report first (serializes, walks, prints). report() returns
+    // false when another thread's stack covered this fault (bounded wait) or on
+    // re-entry: then there was no walk of our own, so no text either. Either
+    // way the message is per-tracer (no shared static stream).
+    //
+    // NOTE: this returns the headers without frames (the walk's frames went to
+    // stderr under the gate): it keeps the old signature for out-of-tree
+    // callers, but the full stack is the printed report. In-tree, no src/
+    // caller uses it.
+    if (!crash_report::report(e, nullptr)) return {};
     StackTracer tracer;
-    tracer.HandleException(e);
-
+    tracer.m_dwExceptionCode = e->ExceptionRecord->ExceptionCode;
+    tracer.m_dwExceptionAddress = (uintptr_t)e->ExceptionRecord->ExceptionAddress;
     return tracer.GetExceptionMsg();
 }
 
 LONG StackTracer::ExceptionFilter(LPEXCEPTION_POINTERS e)
 {
+    // Gate-only since TB-399 item 2 (HandleException asserts the owner): route
+    // it through the gate so it still produces a stack. Anyone calling this
+    // past crash_report gets a note instead of an unsynchronized dbghelp walk.
     return crash_report::filter(e);
 }
 
 // ---------------------------------------------------------------------------
 // crash_report:: the process-wide crash reporter gate (TB-399 item 2).
 // ---------------------------------------------------------------------------
+// Crash-report lines: every line is ONE WriteFile (write_raw), so waiters
+// timing out together cannot splice each other's text mid-line.
+
 namespace crash_report {
 namespace detail {
 namespace {
@@ -103,6 +120,10 @@ namespace {
     // thread is exact: asecond fault on the same thread means the reporter
     // itself faulted (or the fault interrupted the wait/report below).
     thread_local const EXCEPTION_RECORD* in_report = nullptr;
+    // The exception THIS thread's vectored pass just reported (still set after
+    // the gate released). The run loop's __except filter runs AFTER the vectored
+    // report finished, so in_report alone cannot skip it - this one can.
+    thread_local const EXCEPTION_RECORD* last_report = nullptr;
     // The thread id that currently OWNS the reporter (0 = nobody). Set while
     // the mutex is held and read by HandleException's gate assert: a direct
     // caller walks dbghelp only when it IS the owner.
@@ -117,7 +138,7 @@ namespace {
     // stderr as a raw HANDLE, written with WriteFile. A crashed thread may hold
     // the CRT's stdout/stderr lock (the old code used std::cerr from the faulting
     // thread itself), and locking it again from the handler deadlocks.
-    void write_stderr(const char* text) {
+    void write_raw(const char* text) {
         HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
         if (!err || err == INVALID_HANDLE_VALUE) return;
         size_t left = strlen(text);
@@ -133,8 +154,8 @@ namespace {
     }
 
     void write_line(const char* line) {
-        write_stderr(line);
-        write_stderr("\n");
+        write_raw(line);
+        write_raw("\n");
     }
 
     std::string describe(DWORD code, uintptr_t addr) {
@@ -147,8 +168,26 @@ namespace {
 
 } // namespace detail
 
+namespace {
+
+// One WriteFile per line: detail::write_line's two writes (text, then "\n")
+// could splice mid-line when waiters time out together (review of 1c4b9d0).
+// These still std::string-build (heap): on a heap-corrupted fault that can
+// fault again, and the re-entrant fault takes the in_report note path -
+// bounded, one line, no third level (see report()).
+void write_str(const char* a, const char* b = nullptr, const char* c = nullptr) {
+    std::string line;
+    if (a) line += a;
+    if (b) line += b;
+    if (c) line += c;
+    line += "\n";
+    detail::write_raw(line.c_str());
+}
+
+} // namespace
+
 void note(const char* line) {
-    detail::write_line(line);
+    write_str(line);
 }
 
 DWORD detail::gate_owner() { return detail::gate_owner_id.load(std::memory_order_acquire); }
@@ -162,10 +201,13 @@ bool report(LPEXCEPTION_POINTERS e, const char* header) {
     // dbghelp under it) faulted. Never re-enter: print one line and leave.
     // A fault inside the bounded WAIT below lands here too, for the same reason.
     if (detail::in_report) {
-        std::string line = std::string(header ? header : "An uncaught exception occurred.")
-            + " (while reporting " + detail::describe(detail::in_report->ExceptionCode,
-                                              (uintptr_t)detail::in_report->ExceptionAddress) + ")";
-        detail::write_line(line.c_str());
+        // describe() std::string-builds (heap); on a heap-corrupted fault that
+        // can fault again - and the re-entrant fault lands HERE, with in_report
+        // still set, so at most one more line, never a third level.
+        std::string first = detail::describe(detail::in_report->ExceptionCode,
+            (uintptr_t)detail::in_report->ExceptionAddress);
+        write_str(header ? header : "An uncaught exception occurred.",
+            " (while reporting ", first.c_str());
         return false;
     }
 
@@ -179,18 +221,17 @@ bool report(LPEXCEPTION_POINTERS e, const char* header) {
             // and takes the in_report branch above, so no wait can recurse here.
             if (!g.done.wait_for(lock, std::chrono::milliseconds(kWaitForReporterMs),
                                  [&] { return !g.busy; })) {
-                std::string line = std::string(header ? header : "An uncaught exception occurred.")
-                    + " (another thread is already reporting a crash; waited "
-                    + std::to_string(kWaitForReporterMs) + " ms)";
-                detail::write_line(line.c_str());
+                write_str(header ? header : "An uncaught exception occurred.",
+                    " (another thread is already reporting a crash; gave up after ",
+                    (std::to_string(kWaitForReporterMs) + " ms)").c_str());
                 return false;
             }
             // The owner finished: its report is already on stderr. Say so once
             // and leave dying to the OS - a second full stack would interleave
             // with nothing, but the process is going down anyway.
-            std::string line = std::string(header ? header : "An uncaught exception occurred.")
-                + " (" + detail::describe(code, addr) + "; stack reported by another thread)";
-            detail::write_line(line.c_str());
+            std::string where = detail::describe(code, addr);
+            write_str(header ? header : "An uncaught exception occurred.",
+                " (", (where + "; stack reported by another thread)").c_str());
             return false;
         }
         g.busy = true;
@@ -199,9 +240,28 @@ bool report(LPEXCEPTION_POINTERS e, const char* header) {
     detail::in_report = e->ExceptionRecord;
     detail::gate_owner_id.store(GetCurrentThreadId(), std::memory_order_release);
     std::string full;
-    {
+    // The walk itself runs WITHOUT C++ exceptions crossing: StackTracer throws
+    // nothing itself, but std::string/map/ostringstream CAN (bad_alloc on a
+    // corrupted heap). report() is called from a vectored handler and an
+    // __except filter - a C++ exception escaping either is fatal - so every
+    // allocating step below is guarded and the gate is released by RAII.
+    struct Release {
+        detail::Gate& g;
+        ~Release() {
+            detail::in_report = nullptr;
+            detail::gate_owner_id.store(0, std::memory_order_release);
+            {
+                std::lock_guard lock(g.mutex);
+                g.busy = false;
+            }
+            g.done.notify_all();
+        }
+    } release{g};
+    bool walked = false;
+    const EXCEPTION_RECORD* record = e->ExceptionRecord;
+    try {
         // The walk itself: one thread at a time, on a tracer nobody else sees.
-        // HandleException asserts the gate is held (gate_depth above), so a
+        // HandleException asserts the gate is held (gate_owner above), so a
         // future direct caller cannot run dbghelp unsynchronized by accident.
         StackTracer tracer;
         tracer.HandleException(e);
@@ -210,48 +270,55 @@ bool report(LPEXCEPTION_POINTERS e, const char* header) {
             full += "\n";
         }
         full += tracer.GetExceptionMsg();
+        walked = true;
+    } catch (const std::exception& why) {
+        // bad_alloc on a corrupted heap, most likely: the gate still releases
+        // (Release above), and the process still dies - with one line.
+        write_str(header ? header : "An uncaught exception occurred.",
+            " (stack walk failed: ", why.what());
+    } catch (...) {
+        write_str(header ? header : "An uncaught exception occurred.",
+            " (stack walk failed)");
     }
-    detail::write_stderr(full.c_str());
-    if (full.empty() || full.back() != '\n') detail::write_stderr("\n");
-    detail::in_report = nullptr;
-    detail::gate_owner_id.store(0, std::memory_order_release);
-
-    {
-        std::lock_guard lock(g.mutex);
-        g.busy = false;
+    if (walked) {
+        detail::write_raw(full.c_str());
+        if (full.empty() || full.back() != '\n') detail::write_raw("\n");
+        // The run loop's __except filter sees this SAME record after unwinding:
+        // remember it so filter() reports once (see filter()).
+        detail::last_report = record;
     }
-    g.done.notify_all();
-    return true;
+    return walked;
 }
 
 LONG filter(LPEXCEPTION_POINTERS e) {
     // The vectored handler runs FIRST (it is installed with
     // AddVectoredExceptionHandler, which precedes any __except filter on the
     // unwound frames): when it saw this exception it already reported it.
-    // Re-reporting from the filter would walk a second stack for the same fault;
-    // that is only skipped when the exception record is the one THIS thread is
-    // already reporting, or the filter was re-entered on this thread.
+    //
+    // The skip has TWO parts, because the vectored report RELEASES the gate
+    // before unwinding reaches this filter (review of 1c4b9d0: comparing
+    // against in_report alone never skips - it is nullptr again by now):
+    //   1. the record this thread is still reporting (re-entrant filter while
+    //      the vectored report is on the stack), or
+    //   2. the record this thread just reported (the normal linear
+    //      vectored-then-unwind flow for one fault).
     //
     // A DIFFERENT thread's fault reaching this thread's filter (its own vectored
     // pass already ran on ITS thread first) still reports: its owner may have
     // skipped it after the bounded wait, and filter() goes through report(),
     // which serializes again.
-    //
-    // NOTE: in_report is set only between gate acquisition and release. A fault
-    // whose owner already FINISHED (released the gate) reaches the filter with
-    // in_report == nullptr and a busy == false gate, so filter() reports it
-    // again - once. That is the double-report path the old code had for every
-    // main-thread fault (vectored report + __except report): the run-loop call
-    // site below now reports through crash_report once instead.
     if (detail::filter_reentered) {
         return EXCEPTION_EXECUTE_HANDLER;
     }
-    if (e && e->ExceptionRecord && e->ExceptionRecord == detail::in_report) {
+    if (e && e->ExceptionRecord
+        && (e->ExceptionRecord == detail::in_report || e->ExceptionRecord == detail::last_report)) {
         return EXCEPTION_EXECUTE_HANDLER;
     }
+    struct Reset {
+        ~Reset() { detail::filter_reentered = false; }
+    } reset;
     detail::filter_reentered = true;
     report(e, "An exception occurred.");
-    detail::filter_reentered = false;
     return EXCEPTION_EXECUTE_HANDLER;
 }
 

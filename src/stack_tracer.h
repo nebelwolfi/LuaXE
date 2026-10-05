@@ -45,11 +45,18 @@ private:
     // report also repeated every earlier one.
     std::string m_message;
 public:
+    // Through the reporter gate (walks once, prints once): with no owner this
+    // returns "" (another thread's stack covered the fault, or re-entry).
+    // In-tree, this has no callers in src/.
     static std::string GetExceptionStackTrace(LPEXCEPTION_POINTERS e);
 
     StackTracer(void);
 
-    // Always return EXCEPTION_EXECUTE_HANDLER after getting the call stack
+    // Gate-only since TB-399 item 2: HandleException asserts the calling thread
+    // owns the reporter gate (crash_report::report sets that up). Direct
+    // callers past the gate get a note on stderr instead of an unsynchronized
+    // dbghelp walk. In-tree, GetExceptionStackTrace has no callers in src/.
+    // Always returns EXCEPTION_EXECUTE_HANDLER after getting the call stack.
     LONG ExceptionFilter(LPEXCEPTION_POINTERS e);
 
     // return the exception message along with call stacks

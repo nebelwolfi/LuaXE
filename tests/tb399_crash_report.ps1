@@ -78,6 +78,21 @@ if ($stage.Outcome -ne 'exit' -or $stage.Code -ne 0) {
     Write-Host "FAIL could not stage thread.dll in the test store: $(Format-Tb399Outcome $stage)"; exit 1
 }
 $crashCodes = @(-1073741819, -1073740791, -1073741571, -1073740940, -1073740777)
+# A main-thread fault must ALSO report exactly once: the vectored handler runs
+# first and the run loop's __except filter sees the same record after unwinding
+# (an early gate draft reported it twice - review of 1c4b9d0 caught it).
+Set-Content "$S\src\maincrash.lua" @'
+local ffi = ffi or require("ffi")
+ffi.cast("volatile int *", 16)[0] = 1
+'@
+$r = Invoke-Tb399Child "$S\app\lxe.exe" @('run', "$S\src\maincrash.lua") "$S\app" $TimeoutSec
+$mainFull = @($r.Output -split "`n" | Where-Object { $_ -match 'Exception Code:' }).Count
+if ($r.Outcome -eq 'exit' -and $crashCodes -contains $r.Code -and $mainFull -eq 1) {
+    Write-Host "ok   main-thread fault: one report, died $(Format-Tb399Outcome $r)"
+} else {
+    $failures++
+    Write-Host "FAIL main-thread fault: $(Format-Tb399Outcome $r) with $mainFull full report(s)"
+}
 for ($i = 1; $i -le $Runs; $i++) {
     $r = Invoke-Tb399Child "$S\app\lxe.exe" @('run', "$S\src\main.lua", "$Workers") "$S\app" $TimeoutSec
     if ($r.Outcome -eq 'timeout') {
