@@ -134,9 +134,18 @@ static int resolved_module_searcher(lua_State* L) {
         if (found == resolved_dirs.end()) return 0;
         // An install in flight is not ours to wait on here (this searcher runs
         // inside require, which must not block on another state's network):
-        // not published yet means not found yet.
+        // not published yet means not found yet. So a require("name.sub")
+        // that races import("name") falls through to the next searcher instead
+        // of failing OR hanging - usually "not found" until the install lands,
+        // then found on retry. (Review of 382024e: documented, not blocked.)
         if (found->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return 0;
-        dir = found->second.get();
+        try {
+            dir = found->second.get();
+        } catch (const std::exception&) {
+            return 0; // a failed install publishes nothing: behave as not found
+        } catch (...) {
+            return 0;
+        }
     }
     auto rest = wanted.substr(dot + 1);
     // a dotted name only: no separators, drive or `..` out of the folder
@@ -194,6 +203,11 @@ static int import(lua_State* L) {
     // future, so publish/erase under the lock is what wakes the waiters.
     std::shared_future<std::filesystem::path> in_flight;
     std::shared_ptr<std::promise<std::filesystem::path>> installing;
+    // What THIS import asked for: a waiter re-checks it against the folder the
+    // installer publishes (one version per process - review of 382024e: the
+    // first draft skipped the check on the waiter path and silently took the
+    // other import's version).
+    std::string asked = version;
     {
         std::lock_guard lock(import_mutex);
         auto known = resolved_dirs.find(modulename);
@@ -203,14 +217,6 @@ static int import(lua_State* L) {
             auto ready = known->second.wait_for(std::chrono::seconds(0));
             if (ready == std::future_status::ready) {
                 dir = known->second.get();
-                // A store version folder that does not satisfy what is asked now:
-                // say so (a process holds one version of a module).
-                auto folder = dir.filename().string();
-                if (!version.empty() && version != "local" && version != "latest" && modules_dir::is_version(folder)
-                    && !modules_dir::satisfies(folder, version)) {
-                    return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
-                        modulename.c_str(), folder.c_str(), version.c_str());
-                }
             } else {
                 in_flight = known->second; // install in flight: wait on it below
             }
@@ -228,13 +234,29 @@ static int import(lua_State* L) {
         // version folder atomically (one MoveFileExW); two installers of one
         // module in two PROCESSES cannot both publish: the loser finds
         // best_installed and uses it.
-        dir = resolve_module(modulename, version, compiled, &why);
+        //
+        // resolve_module/install_into_store catch their own registry/parse
+        // errors (install.h), but a filesystem throw OUTSIDE them (bad_alloc,
+        // a throwing path overload) must still wake the waiters: a promise
+        // destroyed without a value makes every waiter's get() throw
+        // broken_promise across the C++ frame (fatal) instead of erroring.
+        try {
+            dir = resolve_module(modulename, version, compiled, &why);
+        } catch (const std::exception& thrown) {
+            why = std::string("unexpected error while installing: ") + thrown.what();
+            dir.clear();
+        } catch (...) {
+            why = "unexpected error while installing";
+            dir.clear();
+        }
         installing->set_value(dir); // wakes the waiters' copy of the future
         std::lock_guard lock(import_mutex);
         // Publish under the lock; a failure publishes nothing: erase, so the
         // next import retries instead of waiting on an empty promise forever.
+        // (Only OUR key: nobody else replaces it - waiters only copy - so no
+        // identity check beyond the key is needed.)
         auto it = resolved_dirs.find(modulename);
-        if (it != resolved_dirs.end() && it->second.valid() == in_flight.valid()) {
+        if (it != resolved_dirs.end()) {
             if (!dir.empty())
                 it->second = in_flight; // now ready: waiters' get() returns
             else
@@ -243,11 +265,31 @@ static int import(lua_State* L) {
     } else if (in_flight.valid() && dir.empty()) {
         // Someone else's install: wait on it OUTSIDE the lock (bounded only by
         // the install itself; the installer never holds import_mutex meanwhile,
-        // so this cannot deadlock with it).
-        dir = in_flight.get();
+        // so this cannot deadlock with it). The future is always fulfilled
+        // (empty on failure), so get() cannot throw broken_promise - but a
+        // stored exception still could in theory: guard it into a Lua error.
+        try {
+            dir = in_flight.get();
+        } catch (const std::exception& thrown) {
+            return luaL_error(L, "import: module \"%s\": another import's install failed (%s)",
+                modulename.c_str(), thrown.what());
+        } catch (...) {
+            return luaL_error(L, "import: module \"%s\": another import's install failed",
+                modulename.c_str());
+        }
         if (dir.empty())
             return luaL_error(L, "import: module \"%s\": %s", modulename.c_str(),
                 "another import's install failed (see its error above)");
+    }
+    if (!dir.empty() && !asked.empty() && asked != "local" && asked != "latest") {
+        // One version per process - on EVERY path, including a folder another
+        // import's install just published (review of 382024e: the waiter path
+        // skipped this and silently took the wrong version).
+        auto folder = dir.filename().string();
+        if (modules_dir::is_version(folder) && !modules_dir::satisfies(folder, asked)) {
+            return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
+                modulename.c_str(), folder.c_str(), asked.c_str());
+        }
     }
     if (dir.empty())
         return luaL_error(L, "import: module \"%s\": %s", modulename.c_str(), why.c_str());

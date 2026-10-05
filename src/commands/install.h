@@ -75,6 +75,11 @@ static std::string file_md5(const std::filesystem::path& path) {
 // keeps in the .json next to the bytes, the same bytes install_into_store
 // checks). When the answers must arrive slowly, the probe sets
 // LUAXE_TEST_REGISTRY_DELAY_MS and every lookup/copy sleeps that long first.
+//
+// NOTE: honored by every build, including a shipped lxe - whoever sets this
+// redirects that lxe's installs into a local folder. That is the point for a
+// test (no network), and harmless otherwise (same-privilege env var, files
+// still md5-gated), but never set it outside a test.
 static std::filesystem::path test_registry_dir() {
     const char* dir = std::getenv("LUAXE_TEST_REGISTRY");
     if (!dir || !*dir) return {};
@@ -300,6 +305,13 @@ static std::filesystem::path install_into_store(const std::string& name, std::st
     // not MoveFileEx/remove_all the same target/staging at once - and
     // remember_latest's latest.json write belongs to the same publish.
     // Pure filesystem + one tiny critical section: no network under it.
+    //
+    // NOTE (review of 382024e): this is a function-static in a header defining
+    // a static function, so each including TU gets its OWN mutex. Today that
+    // is fine - concurrent import() threads all enter through state.cpp's
+    // copy, and CLI install/upgrade (main.cpp's copy) is single-threaded - but
+    // a second threaded importer TU would silently get its own lock. If that
+    // ever happens, hoist this to an inline mutex or a .cpp.
     static std::mutex publish_mutex;
     {
         std::lock_guard publish(publish_mutex);
