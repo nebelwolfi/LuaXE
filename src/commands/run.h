@@ -9,6 +9,7 @@
 #include "src/lua/lef.h"
 #include "src/lua/env.h"
 #include "src/lua/modules_dir.h"
+#include "src/lua/relaunch.h"
 #include <luaxe/bind.h>
 
 /// Case-insensitive extension test ("x.LEF" is a .lef).
@@ -96,6 +97,23 @@ static void parse_and_run(std::ostream& out, int i) {
             failed = true;
         }
     }, is_lef);
+    // env.relaunch: the same program again, as "<exe> <program> <new args>".
+    // Checked before `failed`: a program that asked to relaunch and then raised
+    // on its way out still gets its relaunch.
+    if (relaunch::requested()) {
+        std::wstring program;
+        if (is_lef) {
+            program = std::filesystem::path(lua::env::lef_path).wstring();
+        } else {
+            std::error_code ec;
+            program = std::filesystem::absolute(source, ec).lexically_normal().wstring();
+            if (ec || program.empty()) {
+                std::cerr << "Error: cannot relaunch " << source << " (" << ec.message() << ")" << std::endl;
+                std::exit(1);
+            }
+        }
+        relaunch::perform(relaunch::quote(program));
+    }
     if (failed) std::exit(1);
 }
 

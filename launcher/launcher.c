@@ -26,6 +26,10 @@
 //     and, when the console is closed, waits for the app instead of dying
 //     first, so the app gets the system's whole close grace period;
 //   - the app's exit code is the launcher's exit code;
+//   - an app that asks to be relaunched (env.relaunch, src/relaunch_protocol.h)
+//     is started again in this same console, with the arguments it handed over
+//     and with lxe.exe and <name>.lef resolved afresh (an update may have just
+//     replaced either);
 //   - killing the launcher kills the app (a job object with kill-on-close),
 //     while processes the app starts are NOT in that job (silent breakaway),
 //     so its detached children survive exactly as they would without it. This
@@ -37,6 +41,7 @@
 //
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "../src/relaunch_protocol.h"
 
 // The compiler may emit calls to memset/memcpy for struct initialisation; with
 // no CRT linked they have to exist here. VOLATILE byte loops: clang recognises
@@ -148,6 +153,15 @@ static int is_file(const wchar_t* path) {
     return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// is_file, waiting out an update's rename-aside-then-move-in (up to ~2 s).
+static int wait_for_file(const wchar_t* path) {
+    for (int attempt = 0; attempt < 40; attempt++) {
+        if (is_file(path)) return 1;
+        Sleep(50);
+    }
+    return 0;
+}
+
 // The first lxe.exe on PATH, or NULL. Walked here rather than with
 // SearchPathW, which also tries the CURRENT directory: for an app the cwd is
 // the user's workspace, and an lxe.exe planted there must never be the one
@@ -159,7 +173,7 @@ static wchar_t* lxe_on_path(HANDLE heap) {
     wchar_t* list = (wchar_t*)HeapAlloc(heap, 0, (size + 1) * sizeof(wchar_t));
     wchar_t* candidate = (wchar_t*)HeapAlloc(heap, 0, (size + 16) * sizeof(wchar_t));
     if (!list || !candidate) return NULL;
-    if (GetEnvironmentVariableW(L"PATH", list, size + 1) == 0) return NULL;
+    if (GetEnvironmentVariableW(L"PATH", list, size + 1) == 0) { HeapFree(heap, 0, list); HeapFree(heap, 0, candidate); return NULL; }
     const wchar_t* at = list;
     while (*at) {
         const wchar_t* start = at;
@@ -177,8 +191,10 @@ static wchar_t* lxe_on_path(HANDLE heap) {
         wchar_t* cursor = append(candidate, start, (size_t)(end - start));
         cursor = append(cursor, L"\\lxe.exe", 8);
         *cursor = 0;
-        if (is_file(candidate)) return candidate;
+        if (is_file(candidate)) { HeapFree(heap, 0, list); return candidate; }
     }
+    HeapFree(heap, 0, list);
+    HeapFree(heap, 0, candidate);
     return NULL;
 }
 
@@ -202,9 +218,71 @@ static wchar_t* lxe_in_home(HANDLE heap) {
         cursor = append(cursor, L"\\bin\\lxe.exe", 12);
         *cursor = 0;
         if (is_file(path)) return path;
+        HeapFree(heap, 0, path);
         // LXE_HOME set but without lxe: still try the profile default
     }
     return NULL;
+}
+
+static wchar_t* append_number(wchar_t* out, DWORD value) {
+    wchar_t digits[12];
+    int at = 11;
+    digits[at] = 0;
+    do { digits[--at] = (wchar_t)(L'0' + value % 10); value /= 10; } while (value && at > 0);
+    return append(out, digits + at, (size_t)(11 - at));
+}
+
+// 16 hex digits from the clocks, the pid and the sequence: not a secret, a name
+// for one child, so a stale or foreign handshake file is never mistaken for it.
+static void make_nonce(wchar_t* out, unsigned sequence) {
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    unsigned long long value = (unsigned long long)counter.QuadPart ^ GetTickCount64()
+        ^ ((unsigned long long)GetCurrentProcessId() << 32) ^ ((unsigned long long)sequence << 48);
+    value *= 0x9E3779B97F4A7C15ull;
+    for (int i = 15; i >= 0; i--) {
+        unsigned nibble = (unsigned)(value & 15);
+        out[i] = (wchar_t)(nibble < 10 ? L'0' + nibble : L'a' + nibble - 10);
+        value >>= 4;
+    }
+    out[16] = 0;
+}
+
+// The tail a relaunching child handed over (<nonce>\n<tail>, UTF-8), or NULL
+// when there is no such file, it is too large, or its nonce is not this child's.
+static wchar_t* read_relaunch(HANDLE heap, const wchar_t* file, const wchar_t* nonce) {
+    HANDLE handle = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    DWORD size = GetFileSize(handle, NULL);
+    if (size == INVALID_FILE_SIZE || size > LXE_RELAUNCH_MAX_BYTES) { CloseHandle(handle); return NULL; }
+    char* data = (char*)HeapAlloc(heap, 0, size + 1);
+    DWORD read = 0;
+    if (!data || !ReadFile(handle, data, size, &read, NULL) || read != size) {
+        if (data) HeapFree(heap, 0, data);
+        CloseHandle(handle);
+        return NULL;
+    }
+    CloseHandle(handle);
+    data[size] = 0;
+    DWORD i = 0;
+    while (nonce[i] && i < size && (wchar_t)(unsigned char)data[i] == nonce[i]) i++;
+    if (nonce[i] != 0 || i >= size || data[i] != '\n') { HeapFree(heap, 0, data); return NULL; }
+    const char* rest = data + i + 1;
+    int bytes = (int)(size - i - 1);
+    int chars = bytes ? MultiByteToWideChar(CP_UTF8, 0, rest, bytes, NULL, 0) : 0;
+    wchar_t* tail = (wchar_t*)HeapAlloc(heap, 0, ((size_t)chars + 1) * sizeof(wchar_t));
+    if (!tail) { HeapFree(heap, 0, data); return NULL; }
+    if (chars) MultiByteToWideChar(CP_UTF8, 0, rest, bytes, tail, chars);
+    tail[chars] = 0;
+    HeapFree(heap, 0, data);
+    return tail;
+}
+
+// Closes an inheritable duplicate inheritable() made (never the original).
+static void close_duplicate(HANDLE copy, DWORD which) {
+    HANDLE original = GetStdHandle(which);
+    if (copy && copy != INVALID_HANDLE_VALUE && copy != original) CloseHandle(copy);
 }
 
 void __stdcall entry(void) {
@@ -235,71 +313,145 @@ void __stdcall entry(void) {
     cursor = append(cursor, L".lef", 4);
     *cursor = 0;
 
-    if (!is_file(lef)) fail(L"no application at", lef, 0);
-    if (!is_file(runtime)) {
-        wchar_t* found = lxe_in_home(heap);
-        if (!found) found = lxe_on_path(heap);
-        if (!found) fail(L"no LuaXE runtime: lxe.exe is not in %USERPROFILE%\\.lxe\\bin, on PATH or at", runtime, 0);
-        runtime = found;
-    }
-
-    // "<runtime>" "<lef>" <tail>
+    // `beside` keeps "<dir>\lxe.exe": it is re-resolved on every start, since
+    // an update may put an lxe there (or take it away) while this one waits.
+    wchar_t* beside = runtime;
     const wchar_t* tail = arguments_tail(GetCommandLineW());
-    size_t size = wlen(runtime) + wlen(lef) + wlen(tail) + 8;
-    wchar_t* command = (wchar_t*)HeapAlloc(heap, 0, size * sizeof(wchar_t));
-    if (!command) fail(L"out of memory", NULL, 0);
-    cursor = command;
-    cursor = append(cursor, L"\"", 1);
-    cursor = append(cursor, runtime, wlen(runtime));
-    cursor = append(cursor, L"\" \"", 3);
-    cursor = append(cursor, lef, wlen(lef));
-    cursor = append(cursor, L"\"", 1);
-    if (*tail) {
-        cursor = append(cursor, L" ", 1);
-        cursor = append(cursor, tail, wlen(tail));
-    }
-    *cursor = 0;
+    wchar_t* relaunched_tail = NULL;
 
     SetConsoleCtrlHandler(on_console_event, TRUE);
 
-    // The app dies with the launcher; whatever the app starts does not.
-    HANDLE job = CreateJobObjectW(NULL, NULL);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
-        memset(&limits, 0, sizeof(limits));
-        limits.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+    // Relaunch bookkeeping: the handshake file, and the burst guard.
+    wchar_t* handshake = (wchar_t*)HeapAlloc(heap, 0, (MAX_PATH + 64) * sizeof(wchar_t));
+    if (!handshake) fail(L"out of memory", NULL, 0);
+    ULONGLONG recent[LXE_RELAUNCH_MAX_BURST + 1];
+    int recent_count = 0;
+    unsigned sequence = 0;
+
+    wchar_t* found = NULL;
+    for (;;) {
+        // An update swaps files by renaming the old one aside and moving the new
+        // one in: for a moment the path does not exist. Wait that out (~2 s).
+        if (!wait_for_file(lef)) fail(L"no application at", lef, 0);
+        if (found) { HeapFree(heap, 0, found); found = NULL; }
+        // lxe.exe beside the launcher, else lxe's install, else PATH - retried
+        // for ~2 s, since the one that is normally found may be mid-swap.
+        runtime = NULL;
+        for (int attempt = 0; attempt < 40 && !runtime; attempt++) {
+            if (is_file(beside)) {
+                runtime = beside;
+            } else {
+                found = lxe_in_home(heap);
+                if (!found) found = lxe_on_path(heap);
+                if (found) runtime = found;
+                else Sleep(50);
+            }
+        }
+        if (!runtime) fail(L"no LuaXE runtime: lxe.exe is not in %USERPROFILE%\\.lxe\\bin, on PATH or at", beside, 0);
+
+        // "<runtime>" "<lef>" <tail>
+        size_t size = wlen(runtime) + wlen(lef) + wlen(tail) + 8;
+        wchar_t* command = (wchar_t*)HeapAlloc(heap, 0, size * sizeof(wchar_t));
+        if (!command) fail(L"out of memory", NULL, 0);
+        cursor = command;
+        cursor = append(cursor, L"\"", 1);
+        cursor = append(cursor, runtime, wlen(runtime));
+        cursor = append(cursor, L"\" \"", 3);
+        cursor = append(cursor, lef, wlen(lef));
+        cursor = append(cursor, L"\"", 1);
+        if (*tail) {
+            cursor = append(cursor, L" ", 1);
+            cursor = append(cursor, tail, wlen(tail));
+        }
+        *cursor = 0;
+
+        // The handshake for THIS child: a fresh file and nonce. The child takes
+        // both out of its own environment, so nothing it starts sees them.
+        wchar_t nonce[20];
+        make_nonce(nonce, sequence);
+        DWORD temp_length = GetTempPathW(MAX_PATH, handshake);
+        if (temp_length == 0 || temp_length > MAX_PATH) {
+            temp_length = (DWORD)slash;
+            append(handshake, self, slash);
+        }
+        cursor = handshake + temp_length;
+        cursor = append(cursor, L"lxe-relaunch-", 13);
+        cursor = append_number(cursor, GetCurrentProcessId());
+        cursor = append(cursor, L"-", 1);
+        cursor = append_number(cursor, ++sequence);
+        cursor = append(cursor, L".txt", 4);
+        *cursor = 0;
+        DeleteFileW(handshake);
+        SetEnvironmentVariableW(LXE_RELAUNCH_FILE_VAR, handshake);
+        SetEnvironmentVariableW(LXE_RELAUNCH_NONCE_VAR, nonce);
+
+        // The app dies with the launcher; whatever the app starts does not.
+        HANDLE job = CreateJobObjectW(NULL, NULL);
+        if (job) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+            memset(&limits, 0, sizeof(limits));
+            limits.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+                CloseHandle(job);
+                job = NULL;
+            }
+        }
+
+        STARTUPINFOW startup;
+        PROCESS_INFORMATION process;
+        memset(&startup, 0, sizeof(startup));
+        memset(&process, 0, sizeof(process));
+        startup.cb = sizeof(startup);
+        // The std handles are handed on EXPLICITLY, as inheritable duplicates: a
+        // parent that redirected them with non-inheritable handles would otherwise
+        // leave the app with handle values that mean nothing in its process.
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = inheritable(STD_INPUT_HANDLE);
+        startup.hStdOutput = inheritable(STD_OUTPUT_HANDLE);
+        startup.hStdError = inheritable(STD_ERROR_HANDLE);
+        BOOL started = CreateProcessW(runtime, command, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startup, &process);
+        DWORD start_error = GetLastError();
+        SetEnvironmentVariableW(LXE_RELAUNCH_FILE_VAR, NULL);
+        SetEnvironmentVariableW(LXE_RELAUNCH_NONCE_VAR, NULL);
+        close_duplicate(startup.hStdInput, STD_INPUT_HANDLE);
+        close_duplicate(startup.hStdOutput, STD_OUTPUT_HANDLE);
+        close_duplicate(startup.hStdError, STD_ERROR_HANDLE);
+        HeapFree(heap, 0, command);
+        if (!started) fail(L"could not start", runtime, start_error);
+        if (job && !AssignProcessToJobObject(job, process.hProcess)) {
             CloseHandle(job);
             job = NULL;
         }
-    }
+        // Console close waits on the CURRENT child.
+        g_child = process.hProcess;
+        ResumeThread(process.hThread);
+        CloseHandle(process.hThread);
 
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION process;
-    memset(&startup, 0, sizeof(startup));
-    memset(&process, 0, sizeof(process));
-    startup.cb = sizeof(startup);
-    // The std handles are handed on EXPLICITLY, as inheritable duplicates: a
-    // parent that redirected them with non-inheritable handles would otherwise
-    // leave the app with handle values that mean nothing in its process.
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = inheritable(STD_INPUT_HANDLE);
-    startup.hStdOutput = inheritable(STD_OUTPUT_HANDLE);
-    startup.hStdError = inheritable(STD_ERROR_HANDLE);
-    if (!CreateProcessW(runtime, command, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startup, &process)) {
-        fail(L"could not start", runtime, GetLastError());
-    }
-    if (job && !AssignProcessToJobObject(job, process.hProcess)) {
-        CloseHandle(job);
-        job = NULL;
-    }
-    g_child = process.hProcess;
-    ResumeThread(process.hThread);
-    CloseHandle(process.hThread);
+        WaitForSingleObject(process.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(process.hProcess, &code);
+        wchar_t* next = NULL;
+        if (code == LXE_RELAUNCH_EXIT) next = read_relaunch(heap, handshake, nonce);
+        DeleteFileW(handshake);
+        g_child = NULL;
+        CloseHandle(process.hProcess);
+        if (job) CloseHandle(job);
+        if (!next) ExitProcess(code);
 
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(process.hProcess, &code);
-    ExitProcess(code);
+        // A relaunch. More than the burst allows inside the window is a loop.
+        ULONGLONG now = GetTickCount64();
+        int kept = 0;
+        for (int i = 0; i < recent_count; i++) {
+            if (now - recent[i] <= LXE_RELAUNCH_WINDOW_MS) recent[kept++] = recent[i];
+        }
+        recent_count = kept;
+        if (recent_count >= LXE_RELAUNCH_MAX_BURST) {
+            fail(L"the application asked to relaunch too often; stopping", lef, 0);
+        }
+        recent[recent_count++] = now;
+        if (relaunched_tail) HeapFree(heap, 0, relaunched_tail);
+        relaunched_tail = next;
+        tail = relaunched_tail;
+    }
 }

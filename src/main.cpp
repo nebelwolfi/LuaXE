@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "src/lua/modules_dir.h"
+#include "src/lua/relaunch.h"
 #include <version.h>
 #include "commands/register.h"
 #include "commands/update.h"
@@ -13,6 +14,9 @@
 #include "path.h"
 
 int main(int argc, char** argv) {
+    // Before anything else: a launcher's relaunch handshake is read and removed
+    // from this process's environment, so nothing it starts inherits it.
+    relaunch::read_handshake();
     AddDllDirectory((std::filesystem::current_path() / "modules").wstring().c_str());
 
     // TB-195: ONE Lua runtime. lxe.exe links no LuaJIT; the runtime is loaded
@@ -73,6 +77,8 @@ int main(int argc, char** argv) {
                     lua_pop(L, 1);
                 }
             }, true);
+            // env.relaunch: the payload runs again (this exe, no prefix).
+            if (relaunch::requested()) relaunch::perform(L"");
             return 0;
         }
     }

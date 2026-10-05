@@ -46,6 +46,9 @@ add_executable(lxe src/main.cpp
         src/lua/lua_runtime.cpp
         src/lua/modules_dir.h
         src/lua/modules_dir.cpp
+        src/lua/relaunch.h
+        src/lua/relaunch.cpp
+        src/relaunch_protocol.h
         src/lua/globals.h
         src/lua/env.h
         src/is_path_in_PATH.cpp
