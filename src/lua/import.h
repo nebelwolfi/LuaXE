@@ -43,6 +43,11 @@ static __forceinline bool ichar_equals(char a, char b)
 // importer of a name registers an in-flight install, releases the lock, and
 // does the network; concurrent importers of the same name wait on its future
 // outside the lock. Publishing (resolved_dirs) still happens under the lock.
+//
+// NOTE (review of 382024e): like publish_mutex in install.h, these are
+// static-in-header (one instance per including TU). Only state.cpp includes
+// this header today, so there is exactly one - a second including TU would
+// silently split lock AND map. If that ever happens, make both inline (C++17).
 static std::mutex import_mutex;
 
 // The folder each module name resolved to in this process, so a later
@@ -146,6 +151,10 @@ static int resolved_module_searcher(lua_State* L) {
         } catch (...) {
             return 0;
         }
+        // Ready but EMPTY: the install failed between set_value and erase (the
+        // entry is erased under the same lock right after). An empty dir would
+        // resolve against the cwd - never what this searcher means.
+        if (dir.empty()) return 0;
     }
     auto rest = wanted.substr(dot + 1);
     // a dotted name only: no separators, drive or `..` out of the folder
@@ -216,7 +225,25 @@ static int import(lua_State* L) {
         if (known != resolved_dirs.end()) {
             auto ready = known->second.wait_for(std::chrono::seconds(0));
             if (ready == std::future_status::ready) {
-                dir = known->second.get();
+                // Guarded like the waiter path: a stored exception must become a
+                // Lua error, never cross the C frame (fatal). Unreachable today
+                // (the installer only set_values, never set_exception) - kept
+                // symmetric so it stays unreachable safely.
+                try {
+                    dir = known->second.get();
+                } catch (const std::exception& thrown) {
+                    return luaL_error(L, "import: module \"%s\": resolving it failed (%s)",
+                        modulename.c_str(), thrown.what());
+                } catch (...) {
+                    return luaL_error(L, "import: module \"%s\": resolving it failed",
+                        modulename.c_str());
+                }
+                // Ready but EMPTY: the install failed between set_value and erase
+                // (same lock, right after). Fall through to the empty-dir error
+                // below - with why already set when THIS call installed, or the
+                // waiter's message otherwise.
+                if (dir.empty() && why.empty())
+                    why = "another import's install failed (see its error above)";
             } else {
                 in_flight = known->second; // install in flight: wait on it below
             }
@@ -285,8 +312,20 @@ static int import(lua_State* L) {
         // One version per process - on EVERY path, including a folder another
         // import's install just published (review of 382024e: the waiter path
         // skipped this and silently took the wrong version).
+        //
+        // Store folders only: bundled modules and flat source-roots resolve to
+        // whatever was asked for by contract (import.h header docs), and stock
+        // never checked them - only the second import of an installed module.
+        // A store folder is <store>\<name>\<version>.
         auto folder = dir.filename().string();
-        if (modules_dir::is_version(folder) && !modules_dir::satisfies(folder, asked)) {
+        bool from_store = false;
+        {
+            std::error_code ec;
+            auto store_name = modules_dir::store() / modulename;
+            from_store = !dir.empty()
+                && std::filesystem::equivalent(dir.parent_path(), store_name, ec) && !ec;
+        }
+        if (from_store && modules_dir::is_version(folder) && !modules_dir::satisfies(folder, asked)) {
             return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
                 modulename.c_str(), folder.c_str(), asked.c_str());
         }
