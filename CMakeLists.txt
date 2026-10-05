@@ -27,6 +27,7 @@ file(GLOB_RECURSE https src/https/*.cpp src/https/*.h)
 
 add_executable(lxe src/main.cpp
         "res/appicon.rc"
+        src/lxe_exports.def
         src/commands/install.h
         src/stack_tracer.cpp
         src/stack_tracer.h
