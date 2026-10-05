@@ -3,6 +3,7 @@
 //
 #include "src/pch.h"
 #include "src/lua/modules_dir.h"
+#include <shlobj.h>
 
 namespace modules_dir {
 
@@ -36,7 +37,17 @@ std::filesystem::path lxe_home() {
     // LXE_HOME must be absolute: a relative one would resolve against the cwd.
     auto configured = environment_path(L"LXE_HOME");
     if (!configured.empty() && configured.is_absolute()) return configured;
-    auto profile = environment_path(L"USERPROFILE");
+    // The user's REAL profile folder (from the account, not %USERPROFILE%): a
+    // process that points USERPROFILE at an isolated home - a test, an app run
+    // in a sandbox home - still shares the one store. Its version folders are
+    // immutable, so sharing them is safe, and it keeps such a run from
+    // downloading every module again into a throwaway home.
+    PWSTR known = nullptr;
+    std::filesystem::path profile;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, &known)) && known)
+        profile = std::filesystem::path(known);
+    if (known) CoTaskMemFree(known);
+    if (profile.empty() || !profile.is_absolute()) profile = environment_path(L"USERPROFILE");
     if (profile.empty() || !profile.is_absolute()) profile = exe_dir(); // no profile: beside lxe
     return profile / ".lxe";
 }

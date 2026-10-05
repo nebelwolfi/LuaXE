@@ -64,9 +64,11 @@ static void open(lua_State*L) {
         lua_pushstring(L, (modules_dir::app_dir() / "modules").string().c_str());
         return 1;
     });
-    // env.find_module(name[, range]) -> the folder import(name) would load from
-    // WITHOUT installing anything (bundled, then the project's flat folder in a
-    // source run, then the best installed version in the store), or nil.
+    // env.find_module(name[, range[, store_only]]) -> the folder import(name)
+    // would load from WITHOUT installing anything (bundled, then the project's
+    // flat folder in a source run, then the best installed version in the
+    // store), or nil. store_only = true asks the store alone: never a flat
+    // modules\ folder of the cwd, which for an app is the user's workspace.
     env.fun("find_module", [](lua_State* L) -> int {
         std::string name = luaL_checkstring(L, 1);
         std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char)std::tolower(c); });
@@ -78,7 +80,8 @@ static void open(lua_State*L) {
             lua_pushstring(L, bundled->second.string().c_str());
             return 1;
         }
-        if (!lua::env::is_compiled()) {
+        const bool store_only = lua_toboolean(L, 3) != 0;
+        if (!lua::env::is_compiled() && !store_only) {
             for (const auto& root : modules_dir::source_roots()) {
                 if (std::filesystem::is_directory(root / name, ec)) {
                     lua_pushstring(L, (root / name).string().c_str());

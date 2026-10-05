@@ -36,7 +36,8 @@ namespace modules_dir {
 /// longer than MAX_PATH; falls back to the cwd only if Windows cannot answer).
 std::filesystem::path exe_dir();
 
-/// %LXE_HOME%, or %USERPROFILE%\.lxe.
+/// %LXE_HOME%, or <the account's profile folder>\.lxe (not %USERPROFILE%, which a
+/// sandboxed run may point elsewhere: the store is shared and immutable).
 std::filesystem::path lxe_home();
 /// <lxe home>\bin - the installed lxe and its runtime.
 std::filesystem::path bin();
