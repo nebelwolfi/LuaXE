@@ -8,6 +8,7 @@
 #include <optional>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -74,7 +75,28 @@ struct LefFile {
     /// unpack is reported and the payload runs without that module).
     static bool extract_bundled_dlls(const std::string& lef_data);
 
-    static std::vector<LefFile> loaded;
+    // TB-399 item 1: the payloads this process has loaded, as ONE immutable
+    // snapshot behind a mutex - never a bare vector.
+    //
+    // It is written on the main thread (load_from_memory registers it, the restart
+    // loop and extract_bundled_dlls clear it) and read from EVERY state, worker
+    // threads included: new_state installs the package loader closure that walks
+    // it, and a worker still running when its state is closed is DETACHED rather
+    // than joined (modules/Thread's __gc), so such a reader keeps walking while
+    // the main thread clears and refills the vector. With a bare vector that is a
+    // use-after-free of every std::string under it - 5/5 ACCESS_VIOLATION in
+    // tests/tb-399-item1-lef-loaded.ps1.
+    //
+    // register/clear replace the whole snapshot (copy-on-write), and a reader
+    // holds a shared_ptr for as long as it touches a payload, so a clear can
+    // never free bytes a reader is reading. Read through find_chunk, never the
+    // vector.
+    static void register_loaded(const LefFile& file);
+    static void clear_loaded();
+    /// The chunk `name` names (or "modules.<name>"), held so its bytes stay alive
+    /// while the caller loads them, or nullptr when no loaded payload has it.
+    static std::shared_ptr<const File> find_chunk(const std::string& name);
+
     /// Lowercase name -> folder of every module the running payload carries.
     static std::map<std::string, std::filesystem::path> bundled_modules;
 };

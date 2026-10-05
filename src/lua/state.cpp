@@ -142,15 +142,14 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
             lua_getglobal(L, LUA_LOADLIBNAME);
             lua_getfield(L, -1, "loaders");
             lua_pushcclosure(L, +[](lua_State* L) -> int {
+                // TB-399 item 1: find_chunk hands back the chunk held by a
+                // shared_ptr, so a concurrent clear_loaded()/register_loaded() on
+                // the main state cannot free these bytes while they are loaded.
                 auto name = std::string(lua_tostring(L, 1));
-                for (auto&& lefs : LefFile::loaded)
-                    for (auto&& file : lefs.files) {
-                        if (file.type != LefFile::LUA_BYTECODE) continue; // a bundled DLL is not a Lua chunk
-                        if (std::ranges::equal(file.name, name, ichar_equals) || std::ranges::equal(file.name, "modules." + name, ichar_equals)) {
-                            luaL_loadbuffer(L, file.data.c_str(), file.data.size(), ("=" + file.name).c_str());
-                            return 1;
-                        }
-                    }
+                if (auto chunk = LefFile::find_chunk(name)) {
+                    luaL_loadbuffer(L, chunk->data.c_str(), chunk->data.size(), ("=" + chunk->name).c_str());
+                    return 1;
+                }
                 return 0;
             }, 0);
             lua_rawseti(L, -2, lua_objlen(L, -2) + 1);
@@ -182,7 +181,7 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         on_close.clear();
         globals::start_time = std::chrono::high_resolution_clock::now();
         lua_State* L = lua::env::new_state();
-        LefFile::loaded.clear();
+        LefFile::clear_loaded();
         if (!IsDebuggerPresent())
             __try {
                 func(L);
