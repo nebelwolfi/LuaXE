@@ -29,7 +29,6 @@ BOOL consoleHandler(DWORD CEvent)
 }
 
 std::unordered_map<std::string, void*> shared_data;
-StackTracer tracer;
 
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
 {
@@ -76,9 +75,13 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
             if (ExceptionInfo->ExceptionRecord->ExceptionCode == 0xE06D7363) { // C++
                 return EXCEPTION_CONTINUE_SEARCH;
             }
-            tracer.HandleException(ExceptionInfo);
-            std::cerr << "An uncaught exception occurred." << std::endl;
-            std::cerr << tracer.GetExceptionMsg() << std::endl;
+            // TB-399 item 2: the process-wide reporter gate (one stack at a
+            // time; other faulting threads wait bounded or print one line).
+            // EXCEPTION_CONTINUE_SEARCH either way: the fault still kills the
+            // process, it just gets REPORTED first. crash_report::report writes
+            // to the raw stderr HANDLE (WriteFile): no CRT stream lock, which a
+            // crashed thread may still hold (that hang is what the gate fixes).
+            crash_report::report(ExceptionInfo, "An uncaught exception occurred.");
             return EXCEPTION_CONTINUE_SEARCH;
         });
 
@@ -142,15 +145,14 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
             lua_getglobal(L, LUA_LOADLIBNAME);
             lua_getfield(L, -1, "loaders");
             lua_pushcclosure(L, +[](lua_State* L) -> int {
+                // TB-399 item 1: find_chunk hands back the chunk held by a
+                // shared_ptr, so a concurrent clear_loaded()/register_loaded() on
+                // the main state cannot free these bytes while they are loaded.
                 auto name = std::string(lua_tostring(L, 1));
-                for (auto&& lefs : LefFile::loaded)
-                    for (auto&& file : lefs.files) {
-                        if (file.type != LefFile::LUA_BYTECODE) continue; // a bundled DLL is not a Lua chunk
-                        if (std::ranges::equal(file.name, name, ichar_equals) || std::ranges::equal(file.name, "modules." + name, ichar_equals)) {
-                            luaL_loadbuffer(L, file.data.c_str(), file.data.size(), ("=" + file.name).c_str());
-                            return 1;
-                        }
-                    }
+                if (auto chunk = LefFile::find_chunk(name)) {
+                    luaL_loadbuffer(L, chunk->data.c_str(), chunk->data.size(), ("=" + chunk->name).c_str());
+                    return 1;
+                }
                 return 0;
             }, 0);
             lua_rawseti(L, -2, lua_objlen(L, -2) + 1);
@@ -182,13 +184,15 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         on_close.clear();
         globals::start_time = std::chrono::high_resolution_clock::now();
         lua_State* L = lua::env::new_state();
-        LefFile::loaded.clear();
+        LefFile::clear_loaded();
         if (!IsDebuggerPresent())
+            // TB-399 item 2: the main state's own fault goes through the same
+            // process-wide gate. (The vectored handler above runs FIRST for this
+            // exception, so crash_report::filter reports it once: it skips the
+            // record this thread is already reporting.)
             __try {
                 func(L);
-            } __except (tracer.ExceptionFilter(GetExceptionInformation())) {
-                std::cerr << "An exception occurred." << std::endl;
-                std::cerr << tracer.GetExceptionMsg() << std::endl;
+            } __except (crash_report::filter(GetExceptionInformation())) {
             }
         else
             func(L);

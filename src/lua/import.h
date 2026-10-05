@@ -9,6 +9,8 @@
 #include "../https/misc/json.hpp"
 #include "../https/misc/md5.h"
 #include "../commands/install.h"
+#include <chrono>
+#include <future>
 #include <unordered_set>
 #include "lua_runtime.h"
 #include "modules_dir.h"
@@ -33,12 +35,30 @@ static __forceinline bool ichar_equals(char a, char b)
 
 // Resolution and installation are serialized per process: two states importing
 // at once must not race on the store. The module itself is loaded outside the
-// lock (its luaopen may import more).
+// lock (its luaopen may import more). The NETWORK stays outside it too
+// (TB-399 item 3): resolve_module -> install_into_store asks the registry and
+// downloads files, and import() used to hold import_mutex across all of it -
+// every other import, and every require("name.sub") through
+// resolved_module_searcher, blocked for the whole download. Now the first
+// importer of a name registers an in-flight install, releases the lock, and
+// does the network; concurrent importers of the same name wait on its future
+// outside the lock. Publishing (resolved_dirs) still happens under the lock.
+//
+// NOTE (review of 382024e): like publish_mutex in install.h, these are
+// static-in-header (one instance per including TU). Only state.cpp includes
+// this header today, so there is exactly one - a second including TU would
+// silently split lock AND map. If that ever happens, make both inline (C++17).
 static std::mutex import_mutex;
 
 // The folder each module name resolved to in this process, so a later
 // `require("name.sub")` (a module's own Lua files) finds name\sub.lua there.
-static std::map<std::string, std::filesystem::path> resolved_dirs;
+//
+// An install IN FLIGHT is a promise, not a folder: while the first importer of
+// a module does the network (resolve_module does registry I/O and downloads -
+// OUTSIDE the lock since TB-399 item 3), later importers of the same module
+// wait on its future, also outside the lock. The installer publishes the folder
+// under the lock; the map itself is only touched under the lock.
+static std::map<std::string, std::shared_future<std::filesystem::path>> resolved_dirs;
 
 /// A module name import() may join into a folder: no separators, no drive, no
 /// `..` - it names a folder INSIDE a root, never one above it.
@@ -117,7 +137,24 @@ static int resolved_module_searcher(lua_State* L) {
         std::lock_guard lock(import_mutex);
         auto found = resolved_dirs.find(head);
         if (found == resolved_dirs.end()) return 0;
-        dir = found->second;
+        // An install in flight is not ours to wait on here (this searcher runs
+        // inside require, which must not block on another state's network):
+        // not published yet means not found yet. So a require("name.sub")
+        // that races import("name") falls through to the next searcher instead
+        // of failing OR hanging - usually "not found" until the install lands,
+        // then found on retry. (Review of 382024e: documented, not blocked.)
+        if (found->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return 0;
+        try {
+            dir = found->second.get();
+        } catch (const std::exception&) {
+            return 0; // a failed install publishes nothing: behave as not found
+        } catch (...) {
+            return 0;
+        }
+        // Ready but EMPTY: the install failed between set_value and erase (the
+        // entry is erased under the same lock right after). An empty dir would
+        // resolve against the cwd - never what this searcher means.
+        if (dir.empty()) return 0;
     }
     auto rest = wanted.substr(dot + 1);
     // a dotted name only: no separators, drive or `..` out of the folder
@@ -169,24 +206,128 @@ static int import(lua_State* L) {
     }
     std::filesystem::path dir;
     std::string why;
+    // Someone else's install of this module (wait on it below), or the promise
+    // THIS call fulfils when its own install finishes. shared_future has no
+    // set_value; the promise lives in this frame and the map holds only the
+    // future, so publish/erase under the lock is what wakes the waiters.
+    std::shared_future<std::filesystem::path> in_flight;
+    std::shared_ptr<std::promise<std::filesystem::path>> installing;
+    // What THIS import asked for: a waiter re-checks it against the folder the
+    // installer publishes (one version per process - review of 382024e: the
+    // first draft skipped the check on the waiter path and silently took the
+    // other import's version).
+    std::string asked = version;
     {
         std::lock_guard lock(import_mutex);
         auto known = resolved_dirs.find(modulename);
         // One folder per module per process: a second import of a module that
         // already resolved (another of its files, or the same name again) uses it.
         if (known != resolved_dirs.end()) {
-            dir = known->second;
-            // A store version folder that does not satisfy what is asked now:
-            // say so (a process holds one version of a module).
-            auto folder = dir.filename().string();
-            if (!version.empty() && version != "local" && version != "latest" && modules_dir::is_version(folder)
-                && !modules_dir::satisfies(folder, version)) {
-                return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
-                    modulename.c_str(), folder.c_str(), version.c_str());
+            auto ready = known->second.wait_for(std::chrono::seconds(0));
+            if (ready == std::future_status::ready) {
+                // Guarded like the waiter path: a stored exception must become a
+                // Lua error, never cross the C frame (fatal). Unreachable today
+                // (the installer only set_values, never set_exception) - kept
+                // symmetric so it stays unreachable safely.
+                try {
+                    dir = known->second.get();
+                } catch (const std::exception& thrown) {
+                    return luaL_error(L, "import: module \"%s\": resolving it failed (%s)",
+                        modulename.c_str(), thrown.what());
+                } catch (...) {
+                    return luaL_error(L, "import: module \"%s\": resolving it failed",
+                        modulename.c_str());
+                }
+                // Ready but EMPTY: the install failed between set_value and erase
+                // (same lock, right after). Fall through to the empty-dir error
+                // below - with why already set when THIS call installed, or the
+                // waiter's message otherwise.
+                if (dir.empty() && why.empty())
+                    why = "another import's install failed (see its error above)";
+            } else {
+                in_flight = known->second; // install in flight: wait on it below
             }
         } else {
+            // First importer: promise the folder, then resolve WITHOUT the lock
+            // (resolve_module does registry I/O and downloads). Concurrent
+            // importers of the same module find the promise and wait on it.
+            installing = std::make_shared<std::promise<std::filesystem::path>>();
+            in_flight = installing->get_future().share();
+            resolved_dirs.emplace(modulename, in_flight);
+        }
+    }
+    if (installing) {
+        // Outside import_mutex: the network. install_into_store publishes the
+        // version folder atomically (one MoveFileExW); two installers of one
+        // module in two PROCESSES cannot both publish: the loser finds
+        // best_installed and uses it.
+        //
+        // resolve_module/install_into_store catch their own registry/parse
+        // errors (install.h), but a filesystem throw OUTSIDE them (bad_alloc,
+        // a throwing path overload) must still wake the waiters: a promise
+        // destroyed without a value makes every waiter's get() throw
+        // broken_promise across the C++ frame (fatal) instead of erroring.
+        try {
             dir = resolve_module(modulename, version, compiled, &why);
-            if (!dir.empty()) resolved_dirs[modulename] = dir;
+        } catch (const std::exception& thrown) {
+            why = std::string("unexpected error while installing: ") + thrown.what();
+            dir.clear();
+        } catch (...) {
+            why = "unexpected error while installing";
+            dir.clear();
+        }
+        installing->set_value(dir); // wakes the waiters' copy of the future
+        std::lock_guard lock(import_mutex);
+        // Publish under the lock; a failure publishes nothing: erase, so the
+        // next import retries instead of waiting on an empty promise forever.
+        // (Only OUR key: nobody else replaces it - waiters only copy - so no
+        // identity check beyond the key is needed.)
+        auto it = resolved_dirs.find(modulename);
+        if (it != resolved_dirs.end()) {
+            if (!dir.empty())
+                it->second = in_flight; // now ready: waiters' get() returns
+            else
+                resolved_dirs.erase(it);
+        }
+    } else if (in_flight.valid() && dir.empty()) {
+        // Someone else's install: wait on it OUTSIDE the lock (bounded only by
+        // the install itself; the installer never holds import_mutex meanwhile,
+        // so this cannot deadlock with it). The future is always fulfilled
+        // (empty on failure), so get() cannot throw broken_promise - but a
+        // stored exception still could in theory: guard it into a Lua error.
+        try {
+            dir = in_flight.get();
+        } catch (const std::exception& thrown) {
+            return luaL_error(L, "import: module \"%s\": another import's install failed (%s)",
+                modulename.c_str(), thrown.what());
+        } catch (...) {
+            return luaL_error(L, "import: module \"%s\": another import's install failed",
+                modulename.c_str());
+        }
+        if (dir.empty())
+            return luaL_error(L, "import: module \"%s\": %s", modulename.c_str(),
+                "another import's install failed (see its error above)");
+    }
+    if (!dir.empty() && !asked.empty() && asked != "local" && asked != "latest") {
+        // One version per process - on EVERY path, including a folder another
+        // import's install just published (review of 382024e: the waiter path
+        // skipped this and silently took the wrong version).
+        //
+        // Store folders only: bundled modules and flat source-roots resolve to
+        // whatever was asked for by contract (import.h header docs), and stock
+        // never checked them - only the second import of an installed module.
+        // A store folder is <store>\<name>\<version>.
+        auto folder = dir.filename().string();
+        bool from_store = false;
+        {
+            std::error_code ec;
+            auto store_name = modules_dir::store() / modulename;
+            from_store = !dir.empty()
+                && std::filesystem::equivalent(dir.parent_path(), store_name, ec) && !ec;
+        }
+        if (from_store && modules_dir::is_version(folder) && !modules_dir::satisfies(folder, asked)) {
+            return luaL_error(L, "import: module \"%s\" %s is already in use here; \"%s\" was asked for",
+                modulename.c_str(), folder.c_str(), asked.c_str());
         }
     }
     if (dir.empty())

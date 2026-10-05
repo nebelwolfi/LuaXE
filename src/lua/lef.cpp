@@ -6,8 +6,87 @@
 #include "lua_runtime.h"
 #include "modules_dir.h"
 #include "src/json.hpp"
+#include <cctype> // std::tolower for iequals
 
-std::vector<LefFile> LefFile::loaded = {};
+namespace {
+
+/// Case-insensitive equality, the comparison the payload loader has always used.
+bool iequals(const std::string& a, const std::string& b) {
+    return a.size() == b.size()
+        && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x))
+                   == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+
+// TB-399 item 1: the loaded payloads, as an immutable snapshot of shared owners.
+// A writer replaces the whole thing; a reader takes its own shared_ptr and keeps
+// the payload alive for as long as it reads it, so clear()/register() can never
+// pull the bytes out from under it.
+//
+// IMMORTAL on purpose (allocated once, never destroyed): a worker thread that
+// thread's __gc detached is still running when main() returns, and the CRT's
+// static destructors would otherwise destroy this mutex and list under it -
+// measured as a 0xC0000409 fast-fail at exit (std::mutex used after
+// destruction) in tests\tb399_lef_loaded.ps1.
+struct LoadedState {
+    std::mutex mutex;
+    std::shared_ptr<const std::vector<std::shared_ptr<const LefFile>>> snapshot =
+        std::make_shared<const std::vector<std::shared_ptr<const LefFile>>>();
+};
+LoadedState& loaded_state() {
+    static LoadedState* state = new LoadedState(); // never deleted, see above
+    return *state;
+}
+
+} // namespace
+
+void LefFile::register_loaded(const LefFile& file) {
+    auto owner = std::make_shared<const LefFile>(file);
+    auto& state = loaded_state();
+    std::lock_guard lock(state.mutex);
+    auto next = std::make_shared<std::vector<std::shared_ptr<const LefFile>>>(*state.snapshot);
+    next->push_back(owner);
+    state.snapshot = std::move(next);
+}
+
+void LefFile::clear_loaded() {
+    // The empty vector is allocated BEFORE the lock: if that allocation throws,
+    // the snapshot is untouched instead of left null.
+    auto empty = std::make_shared<const std::vector<std::shared_ptr<const LefFile>>>();
+    auto& state = loaded_state();
+    std::shared_ptr<const std::vector<std::shared_ptr<const LefFile>>> dropped;
+    {
+        std::lock_guard lock(state.mutex);
+        dropped = std::move(state.snapshot);
+        state.snapshot = std::move(empty);
+    }
+    // `dropped` is released HERE, outside the lock: it frees only what no reader
+    // still holds a reference to.
+}
+
+std::shared_ptr<const LefFile::File> LefFile::find_chunk(const std::string& name) {
+    std::shared_ptr<const std::vector<std::shared_ptr<const LefFile>>> snapshot;
+    {
+        auto& state = loaded_state();
+        std::lock_guard lock(state.mutex);
+        snapshot = state.snapshot;
+    }
+    // The lock is released here: the snapshot is immutable and refcounted, so the
+    // walk below is safe even while the main thread clears and refills the vector.
+    const std::string prefixed = "modules." + name; // hoisted: built once, not per file
+    for (const auto& lef : *snapshot) {
+        for (const auto& file : lef->files) {
+            if (file.type != LefFile::LUA_BYTECODE) continue; // a bundled DLL is not a Lua chunk
+            if (iequals(file.name, name) || iequals(file.name, prefixed)) {
+                // Aliasing: the File's owner (the whole LefFile) stays alive too.
+                return std::shared_ptr<const File>(lef, &file);
+            }
+        }
+    }
+    return nullptr;
+}
+
 std::map<std::string, std::filesystem::path> LefFile::bundled_modules = {};
 
 std::optional<LefFile> LefFile::load_from_file(const std::string &path) {
@@ -84,7 +163,11 @@ std::optional<LefFile> LefFile::load_from_memory(const std::string &data) {
         pos += (size_t)len;
     }
 
-    LefFile::loaded.push_back(lefFile);
+    // The copy is deliberate: this function also RETURNS the payload it just
+    // registered, and callers load their chunk out of that return value
+    // (load_lua_memory). Moving it in here returned a moved-from LefFile and
+    // faulted at the next luaL_loadbuffer (state.cpp).
+    LefFile::register_loaded(lefFile);
 
     return lefFile;
 }
@@ -143,7 +226,7 @@ std::string bundle_version(const std::filesystem::path& modules_path, const std:
 bool LefFile::extract_bundled_dlls(const std::string& lef_data) {
     auto preview = LefFile::load_from_memory(lef_data);
     // load_from_memory registers what it parsed; this was only a preview.
-    LefFile::loaded.clear();
+    LefFile::clear_loaded();
     if (!preview) return false;
 
     // Every failure below is reported, never thrown out of main; the payload
