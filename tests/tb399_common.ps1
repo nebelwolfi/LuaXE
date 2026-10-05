@@ -37,9 +37,19 @@ function Invoke-Tb399Child([string]$Exe, [string[]]$Arguments, [string]$Cwd,
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    # An explicit environment REPLACES the whole block (the child must run with
+    # ONLY these variables, e.g. for the stub-registry tests) - and a child
+    # with SystemRoot alone cannot even start (WinSxS/loader needs more), so
+    # SystemRoot/SystemDrive are always kept unless the caller sets them.
     if ($null -ne $Environment) {
         $psi.EnvironmentVariables.Clear()
         foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[$k] = [string]$Environment[$k] }
+        if (-not $psi.EnvironmentVariables.ContainsKey('SystemRoot')) {
+            $psi.EnvironmentVariables['SystemRoot'] = [System.Environment]::GetEnvironmentVariable('SystemRoot')
+        }
+        if (-not $psi.EnvironmentVariables.ContainsKey('SystemDrive')) {
+            $psi.EnvironmentVariables['SystemDrive'] = [System.Environment]::GetEnvironmentVariable('SystemDrive')
+        }
     }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi

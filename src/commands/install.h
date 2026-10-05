@@ -9,6 +9,9 @@
 #include "../https/connection/API.h"
 #include "../https/misc/md5.h"
 #include "../lua/modules_dir.h"
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 // Modules are installed into lxe's versioned STORE (src/lua/modules_dir.h):
 //
@@ -25,8 +28,7 @@
 // project commands that maintain it.
 
 /// A file name the registry sends must stay inside its module's folder.
-static bool safe_module_file(const std::string& file_name) {
-    std::filesystem::path p(file_name);
+static bool safe_module_file(const std::string& file_name) {    std::filesystem::path p(file_name);
     if (file_name.empty() || p.has_root_name() || p.has_root_directory()) return false;
     for (const auto& part : p) {
         if (part == ".." || part.string().find(':') != std::string::npos) return false;
@@ -58,9 +60,60 @@ static std::string file_md5(const std::filesystem::path& path) {
     return ::md5(data);
 }
 
+// ---- the test registry -----------------------------------------------------
+// TB-399 item 3 probes this without touching luaxe.dev (or any network): when
+// LUAXE_TEST_REGISTRY is set to a FOLDER, the registry_record() lookup below
+// reads <folder>/<name>.json and download_file_to() copies <folder>/<file>
+// instead of asking the network. The folder is the test's own stub registry;
+// the variable is honored by every build (a test sets it for its own child),
+// never by accident - nobody sets it outside a test.
+//
+// The file layout mirrors the two registry calls exactly:
+//   list:     <folder>/<name>.json       like ?action=list&module=<name>
+//   download: <folder>/<file>            like ?action=download&...&file=<file>
+// (what the real registry keys the download by - version and md5 - the probe
+// keeps in the .json next to the bytes, the same bytes install_into_store
+// checks). When the answers must arrive slowly, the probe sets
+// LUAXE_TEST_REGISTRY_DELAY_MS and every lookup/copy sleeps that long first.
+static std::filesystem::path test_registry_dir() {
+    const char* dir = std::getenv("LUAXE_TEST_REGISTRY");
+    if (!dir || !*dir) return {};
+    return std::filesystem::path(dir);
+}
+
+static void test_registry_delay() {
+    const char* ms = std::getenv("LUAXE_TEST_REGISTRY_DELAY_MS");
+    if (!ms || !*ms) return;
+    try {
+        int delay = std::stoi(ms);
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    } catch (const std::exception&) {
+    }
+}
+
 /// The registry's record for name@request ({"name","version","files":[{name,md5}],
 /// "dependencies"}), or a null json (offline, unknown module, bad answer).
 static nlohmann::json registry_record(const std::string& name, const std::string& request, std::ostream& out) {
+    if (auto stub = test_registry_dir(); !stub.empty()) {
+        test_registry_delay();
+        std::error_code ec;
+        auto file = stub / (name + ".json");
+        if (!std::filesystem::exists(file, ec)) return nlohmann::json();
+        try {
+            auto j = nlohmann::json::parse(std::ifstream(file));
+            if (!j.is_object()) return nlohmann::json();
+            if (j.contains("error")) {
+                out << "[-] " << name << "@" << request << ": "
+                    << (j["error"].is_string() ? j["error"].get<std::string>() : j["error"].dump()) << std::endl;
+                return nlohmann::json();
+            }
+            if (!j.contains("version") || !j["version"].is_string() || !modules_dir::is_version(j["version"].get<std::string>()))
+                return nlohmann::json();
+            return j;
+        } catch (const std::exception&) {
+            return nlohmann::json();
+        }
+    }
     std::string response;
     try {
         API a;
@@ -170,6 +223,8 @@ static std::filesystem::path install_into_store(const std::string& name, std::st
     }
 
     const auto target = modules_dir::store() / name / version;
+    // Installed while we downloaded (another process, or our own retry after
+    // the publish below failed): use it, do not download again.
     std::error_code ec;
     if (!modules_dir::best_installed(name, version).empty()) {
         if (latest) remember_latest(name, version);
@@ -177,7 +232,13 @@ static std::filesystem::path install_into_store(const std::string& name, std::st
     }
 
     out << "[+] installing " << name << "@" << version << " into " << target.string() << std::endl;
-    auto staging = modules_dir::store() / name / ("." + version + "." + std::to_string(GetCurrentProcessId()) + ".tmp");
+    // Per THREAD, not per process (TB-399 item 3): two threads of one process
+    // can both be inside install_into_store now that import() no longer holds
+    // its lock across the network. Sharing one staging folder would let one
+    // thread's remove_all delete the other's half-downloaded files.
+    auto staging = modules_dir::store() / name
+        / ("." + version + "." + std::to_string(GetCurrentProcessId())
+           + "." + std::to_string(GetCurrentThreadId()) + ".tmp");
     std::filesystem::remove_all(staging, ec);
     std::filesystem::create_directories(staging, ec);
     if (ec) {
@@ -206,12 +267,20 @@ static std::filesystem::path install_into_store(const std::string& name, std::st
             std::filesystem::create_directories(path.parent_path(), ec);
             out << "    " << file_name;
             bool downloaded = false;
-            try {
-                API a;
-                downloaded = a.DownloadFile("luaxe.dev", "/api/v1?action=download&module=" + url_encode(name) + "&version="
-                    + url_encode(version) + "&file=" + url_encode(file_name), path.string());
-            } catch (const std::exception&) {
-                downloaded = false;
+            if (auto stub = test_registry_dir(); !stub.empty()) {
+                // The test stub: a copy, not a download.
+                test_registry_delay();
+                std::error_code copy_ec;
+                downloaded = std::filesystem::copy_file(stub / std::filesystem::path(file_name), path, copy_ec)
+                    && !copy_ec;
+            } else {
+                try {
+                    API a;
+                    downloaded = a.DownloadFile("luaxe.dev", "/api/v1?action=download&module=" + url_encode(name) + "&version="
+                        + url_encode(version) + "&file=" + url_encode(file_name), path.string());
+                } catch (const std::exception&) {
+                    downloaded = false;
+                }
             }
             if (!downloaded || file_md5(path) != md5) {
                 out << (downloaded ? " [FAIL: checksum]" : " [FAIL]") << std::endl;
@@ -227,15 +296,23 @@ static std::filesystem::path install_into_store(const std::string& name, std::st
     }
     // One move publishes the whole version. Losing the race to another process
     // that installed the same version is fine: its folder is the same module.
-    if (!MoveFileExW(staging.c_str(), target.c_str(), 0)) {
-        std::filesystem::remove_all(staging, ec);
-        if (modules_dir::best_installed(name, version).empty()) {
-            out << "[-] could not publish " << target.string() << " (Windows error " << GetLastError() << ")" << std::endl;
-            return {};
+    // Serialized per process (TB-399 item 3): two threads of one process must
+    // not MoveFileEx/remove_all the same target/staging at once - and
+    // remember_latest's latest.json write belongs to the same publish.
+    // Pure filesystem + one tiny critical section: no network under it.
+    static std::mutex publish_mutex;
+    {
+        std::lock_guard publish(publish_mutex);
+        if (!MoveFileExW(staging.c_str(), target.c_str(), 0)) {
+            std::filesystem::remove_all(staging, ec);
+            if (modules_dir::best_installed(name, version).empty()) {
+                out << "[-] could not publish " << target.string() << " (Windows error " << GetLastError() << ")" << std::endl;
+                return {};
+            }
         }
+        // Remembered only once that version really is installed.
+        if (latest) remember_latest(name, version);
     }
-    // Remembered only once that version really is installed.
-    if (latest) remember_latest(name, version);
     return target;
 } catch (const std::exception& why) {
     // A registry answer with a missing or mistyped field must not take the
