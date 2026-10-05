@@ -29,7 +29,6 @@ BOOL consoleHandler(DWORD CEvent)
 }
 
 std::unordered_map<std::string, void*> shared_data;
-StackTracer tracer;
 
 void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
 {
@@ -76,9 +75,13 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
             if (ExceptionInfo->ExceptionRecord->ExceptionCode == 0xE06D7363) { // C++
                 return EXCEPTION_CONTINUE_SEARCH;
             }
-            tracer.HandleException(ExceptionInfo);
-            std::cerr << "An uncaught exception occurred." << std::endl;
-            std::cerr << tracer.GetExceptionMsg() << std::endl;
+            // TB-399 item 2: the process-wide reporter gate (one stack at a
+            // time; other faulting threads wait bounded or print one line).
+            // EXCEPTION_CONTINUE_SEARCH either way: the fault still kills the
+            // process, it just gets REPORTED first. crash_report::report writes
+            // to the raw stderr HANDLE (WriteFile): no CRT stream lock, which a
+            // crashed thread may still hold (that hang is what the gate fixes).
+            crash_report::report(ExceptionInfo, "An uncaught exception occurred.");
             return EXCEPTION_CONTINUE_SEARCH;
         });
 
@@ -183,11 +186,13 @@ void load_lua_state_and_run(std::function<void(lua_State*)> func, bool compiled)
         lua_State* L = lua::env::new_state();
         LefFile::clear_loaded();
         if (!IsDebuggerPresent())
+            // TB-399 item 2: the main state's own fault goes through the same
+            // process-wide gate. (The vectored handler above runs FIRST for this
+            // exception, so crash_report::filter reports it once: it skips the
+            // record this thread is already reporting.)
             __try {
                 func(L);
-            } __except (tracer.ExceptionFilter(GetExceptionInformation())) {
-                std::cerr << "An exception occurred." << std::endl;
-                std::cerr << tracer.GetExceptionMsg() << std::endl;
+            } __except (crash_report::filter(GetExceptionInformation())) {
             }
         else
             func(L);

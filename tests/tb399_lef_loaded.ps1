@@ -42,8 +42,12 @@ Copy-Item (Join-Path (Split-Path -Parent $Lxe) 'lua51.dll') "$S\app\"
 # and asks the store: give it a store of its own (LXE_HOME) holding thread, so
 # the test reads nothing of the user's ~\.lxe and never reaches the network.
 Copy-Item $thread "$S\home\modules\thread\1.0.0\thread.dll"
+# try/finally: with -ErrorAction Stop any throw below must still restore the
+# developer's LXE_HOME (unset stays unset) and remove the temp dir.
 $savedHome = $env:LXE_HOME
+$hadHome = Test-Path Env:\LXE_HOME
 $env:LXE_HOME = "$S\home"
+try {
 1..300 | ForEach-Object { Set-Content "$S\src\f$_.lua" "return $_" }
 Set-Content "$S\src\main.lua" @'
 -- Only arguments cross into a worker: thread:load dumps the function, and a
@@ -57,6 +61,12 @@ local f = io.open(counter_file, "r")
 if f then n = tonumber(f:read("*a")) or 0; f:close() end
 n = n + 1
 f = assert(io.open(counter_file, "w")); f:write(tostring(n)); f:close()
+
+-- Positive control, every state: a find_chunk that always misses would still
+-- pass the stress verdict, so prove the loader serves real payload chunks.
+-- (f1..f300 each return their number; the modules. prefix path is NOT covered
+-- here - compile embeds them bare, and import() covers the packaged layout.)
+assert(require("f123") == 123, "payload loader must serve bundled chunks")
 
 for _ = 1, 4 do
   local t = new_thread()
@@ -77,7 +87,7 @@ if n >= limit then
   local d = assert(io.open(done_file, "w")); d:write("done after ", n, " states"); d:close()
   return
 end
-sleep(20) -- let the readers get going before the list is rewritten
+sleep(20) -- milliseconds: let the readers get going before the list is rewritten
 env.reload()
 '@
 Push-Location "$S\src"
@@ -103,8 +113,10 @@ for ($i = 1; $i -le $Runs; $i++) {
         ($r.Output -split "`n" | Select-Object -First 12) | ForEach-Object { Write-Host "       $_" }
     }
 }
-Remove-Item -Recurse -Force $S -EA SilentlyContinue
-$env:LXE_HOME = $savedHome
+} finally {
+    if ($hadHome) { $env:LXE_HOME = $savedHome } else { Remove-Item Env:\LXE_HOME -EA SilentlyContinue }
+    Remove-Item -Recurse -Force $S -EA SilentlyContinue
+}
 if ($failures -gt 0) { Write-Host "$failures of $Runs run(s) failed"; exit 1 }
 Write-Host "all $Runs runs clean"
 exit 0

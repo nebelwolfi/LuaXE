@@ -6,6 +6,7 @@
 #include "lua_runtime.h"
 #include "modules_dir.h"
 #include "src/json.hpp"
+#include <cctype> // std::tolower for iequals
 
 namespace {
 
@@ -50,12 +51,15 @@ void LefFile::register_loaded(const LefFile& file) {
 }
 
 void LefFile::clear_loaded() {
+    // The empty vector is allocated BEFORE the lock: if that allocation throws,
+    // the snapshot is untouched instead of left null.
+    auto empty = std::make_shared<const std::vector<std::shared_ptr<const LefFile>>>();
     auto& state = loaded_state();
     std::shared_ptr<const std::vector<std::shared_ptr<const LefFile>>> dropped;
     {
         std::lock_guard lock(state.mutex);
         dropped = std::move(state.snapshot);
-        state.snapshot = std::make_shared<const std::vector<std::shared_ptr<const LefFile>>>();
+        state.snapshot = std::move(empty);
     }
     // `dropped` is released HERE, outside the lock: it frees only what no reader
     // still holds a reference to.
@@ -70,10 +74,11 @@ std::shared_ptr<const LefFile::File> LefFile::find_chunk(const std::string& name
     }
     // The lock is released here: the snapshot is immutable and refcounted, so the
     // walk below is safe even while the main thread clears and refills the vector.
+    const std::string prefixed = "modules." + name; // hoisted: built once, not per file
     for (const auto& lef : *snapshot) {
         for (const auto& file : lef->files) {
             if (file.type != LefFile::LUA_BYTECODE) continue; // a bundled DLL is not a Lua chunk
-            if (iequals(file.name, name) || iequals(file.name, "modules." + name)) {
+            if (iequals(file.name, name) || iequals(file.name, prefixed)) {
                 // Aliasing: the File's owner (the whole LefFile) stays alive too.
                 return std::shared_ptr<const File>(lef, &file);
             }

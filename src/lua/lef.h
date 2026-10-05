@@ -85,7 +85,7 @@ struct LefFile {
     // than joined (modules/Thread's __gc), so such a reader keeps walking while
     // the main thread clears and refills the vector. With a bare vector that is a
     // use-after-free of every std::string under it - 5/5 ACCESS_VIOLATION in
-    // tests/tb-399-item1-lef-loaded.ps1.
+    // tests/tb399_lef_loaded.ps1.
     //
     // register/clear replace the whole snapshot (copy-on-write), and a reader
     // holds a shared_ptr for as long as it touches a payload, so a clear can
@@ -98,6 +98,12 @@ struct LefFile {
     static std::shared_ptr<const File> find_chunk(const std::string& name);
 
     /// Lowercase name -> folder of every module the running payload carries.
+    /// TB-399 item 1 note: this has the same write-while-workers-read SHAPE as
+    /// loaded had, but it is write-once in practice: both writers
+    /// (extract_bundled_dlls, from main.cpp and run.h) run BEFORE the first Lua
+    /// state exists, and the restart loop never re-extracts. import() reads it
+    /// under import_mutex; env.find_module reads it WITHOUT a lock. Keep it
+    /// write-once-before-first-state, or snapshot it the same way as loaded.
     static std::map<std::string, std::filesystem::path> bundled_modules;
 };
 
