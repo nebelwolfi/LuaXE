@@ -1,0 +1,19 @@
+// TB-191: lxe.exe's one exported symbol.
+//
+// LuaJIT's SusGetProcAddress (lj_sus.c, inside lua51.dll) resolves every
+// ffi.C.<name> lookup by walking SIX default modules, the first of which is
+// lxe.exe itself. An executable normally carries NO export directory
+// (RVA=0,size=0), and SusGetProcAddress never checks for that: it reads the
+// DOS header at base+0 as an IMAGE_EXPORT_DIRECTORY, so NumberOfNames and
+// AddressOfNames are header garbage and the first name read faults
+// (0xC0000005 at lua_close, when the looked-up cdata is freed).
+//
+// This anchor gives the linker a reason to emit a VALID, minimal export
+// directory (exactly one name, PRIVATE so it stays out of the import library).
+// A .def EXPORTS list is additive: it cannot suppress other dllexport'd
+// symbols, so the "exactly one name" invariant holds only because no other
+// dllexport exists in src/ (the lua_* forwarding stubs in lua_runtime.cpp are
+// plain extern "C" definitions). tests/tb191_ffi_c.ps1 asserts the table.
+LIBRARY lxe
+EXPORTS
+    luaxe_export_anchor PRIVATE

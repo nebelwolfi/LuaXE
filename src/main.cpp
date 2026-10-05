@@ -13,6 +13,17 @@
 #include "cli.h"
 #include "path.h"
 
+// TB-191: the anchor behind src/lxe_exports.def. lxe.exe must carry a valid,
+// minimal export directory (exactly this one name): LuaJIT's SusGetProcAddress
+// walks the EXE's own exports for every ffi.C lookup, and with no export
+// directory it reads DOS-header garbage and faults at lua_close. This symbol
+// does nothing and must never be called; no lua_* stub may ever be exported
+// beside it (ffi.C must keep resolving those in lua51.dll, not lxe).
+// The dllexport below is what emits the export entry (CMake/Ninja does not
+// pass a .def to the linker for an executable target); the .def only pins
+// the PRIVATE attribute and documents the contract.
+extern "C" __declspec(dllexport) void luaxe_export_anchor(void) {}
+
 int main(int argc, char** argv) {
     // Before anything else: a launcher's relaunch handshake is read and removed
     // from this process's environment, so nothing it starts inherits it.
