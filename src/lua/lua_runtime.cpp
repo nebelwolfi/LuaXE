@@ -289,10 +289,12 @@ void reset_bind() {
 // LUAXE_ALLOW_UNVERIFIED_LUA51 says otherwise.
 // ---------------------------------------------------------------------------
 const char* kKnownGood[] = {
-    // lua51.dll as served by luaxe.dev (LuaJIT 2.1.M.64, patched: ll_loadfunc)
+    // lua51.dll as luaxe.dev served it until 2026-10-05 (LuaJIT 2.1.M.64, patched: ll_loadfunc)
     "3add53a27543bfccf5eb355eeb5499e2a7ea61f7624cac539b735ba6056178f9",
-    // the same patched LuaJIT built in C:\LuaJIT-2.1.M.64\src
+    // the same patched LuaJIT built in C:\LuaJIT-2.1.M.64\src, with the lj_fopen.c
+    // fix (filename and mode each converted on their own length); luaxe.dev serves it now
     "554caf2a2ca3e1ae4b32ed2c1bc146eac73f8a6fe77609a15fe2d19fc64bf46e",
+    "bf9f41be003e25623caa442a9ebe5a7bfb1efa84f1722a1dce8dcd2867162f85",
 };
 
 bool truthy_env(const char* name) {
